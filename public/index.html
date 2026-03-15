@@ -1127,10 +1127,110 @@ async function fetchNetwork() {
 pushLog('Fetching network state...');
 
 fetchBootstrap().then(() => {
-  // Fetch live agents immediately, then poll every 10 seconds
   fetchNetwork();
   setInterval(fetchNetwork, 10000);
 });
+
+// ─────────────────────────────────────────────
+//  NATS BROWSER CONNECTION — live agent discovery
+// ─────────────────────────────────────────────
+const natsAgents = new Map(); // peerId -> announcement
+
+async function connectNats() {
+  try {
+    // nats.ws ESM bundle from CDN
+    const natsModule = await import('https://cdn.jsdelivr.net/npm/nats.ws@1.30.3/esm/nats.js');
+    const nc = await natsModule.connect({ servers: 'wss://demo.nats.io:8443', timeout: 5000 });
+    pushLog('NATS connected to <span class="log-highlight">demo.nats.io</span>');
+
+    const sc = natsModule.StringCodec();
+    const sub = nc.subscribe('nexus.agents.discovery');
+
+    (async () => {
+      for await (const msg of sub) {
+        try {
+          const ann = JSON.parse(sc.decode(msg.data));
+          if (ann.type !== 'nexus.announce' || !ann.peerId) continue;
+
+          const isNew = !natsAgents.has(ann.peerId);
+          natsAgents.set(ann.peerId, ann);
+
+          if (isNew) {
+            const label = ann.agentName || ann.peerId.slice(0, 8);
+            pushLog(`<span class="log-highlight">${label}</span> discovered via NATS`);
+
+            // Add to Three.js scene
+            const idx = nodes.length;
+            addNode(label, idx, nodes.length + 1);
+            knownAgents.set(ann.peerId, { index: idx, data: ann });
+
+            // Build connections between agents sharing rooms
+            if (knownAgents.size >= 2) {
+              const agentArr = Array.from(knownAgents.values());
+              for (let i = 0; i < agentArr.length - 1; i++) {
+                const a = agentArr[i].data;
+                const b = agentArr[agentArr.length - 1].data;
+                const shared = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
+                if (shared.length > 0) {
+                  addConnection(agentArr[i].index, agentArr[agentArr.length - 1].index);
+                }
+              }
+            }
+
+            // Blink the new node
+            blinkNode(idx);
+
+            // Render sidebar card
+            renderNatsAgentCard(ann);
+          }
+
+          // Update dials with live count
+          setDial('dial-peers-arc', 'dial-peers-val', (natsAgents.size / 100) * 100, String(natsAgents.size));
+        } catch { /* ignore malformed */ }
+      }
+    })().catch(() => {});
+
+    // Also subscribe to presence
+    nc.subscribe('nexus.agents.presence');
+
+  } catch (err) {
+    pushLog(`NATS: <span style="color:#666">${err.message || 'unavailable'}</span>`);
+  }
+}
+
+function renderNatsAgentCard(ann) {
+  // Add divider if first NATS agent
+  if (!nodesList.querySelector('.nats-divider')) {
+    const div = document.createElement('div');
+    div.className = 'nats-divider';
+    div.style.cssText = 'padding:4px 10px;font-size:7px;color:#555;letter-spacing:0.2em;text-transform:uppercase;margin-top:6px';
+    div.textContent = 'live (nats)';
+    nodesList.appendChild(div);
+  }
+
+  const card = document.createElement('div');
+  card.className = 'peer-card live-agent';
+  card.setAttribute('role', 'listitem');
+  card.setAttribute('data-peer', ann.peerId);
+
+  const name = ann.agentName || 'anonymous';
+  const shortId = ann.peerId.slice(0, 8);
+  const rooms = (ann.rooms || []).join(', ') || '';
+
+  card.innerHTML = `
+    <div class="peer-name">
+      <div class="peer-dot" style="background:#fff;box-shadow:0 0 4px #fff"></div>
+      <div class="peer-name-text">${name}</div>
+    </div>
+    <div class="peer-meta">
+      <div class="peer-meta-item">${shortId}...</div>
+      ${rooms ? `<div class="peer-meta-item">${rooms}</div>` : ''}
+    </div>
+  `;
+  nodesList.appendChild(card);
+}
+
+connectNats();
 
 // ─────────────────────────────────────────────
 //  COPY INSTALL COMMAND

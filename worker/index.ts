@@ -139,7 +139,7 @@ export default {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'no-store',
             'X-Content-Type-Options': 'nosniff',
-            'Content-Security-Policy': `script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; object-src 'none'`,
+            'Content-Security-Policy': `script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net wss://demo.nats.io:8443; object-src 'none'`,
           },
         });
       }

@@ -1123,13 +1123,109 @@ async function fetchNetwork() {
   }
 }
 
+// ─────────────────────────────────────────────
+//  KV DIRECTORY — load persisted agents on page open, writeback every 60s
+// ─────────────────────────────────────────────
+async function loadDirectory() {
+  try {
+    const res = await fetch('/api/v1/directory');
+    if (!res.ok) return;
+    const dir = await res.json();
+    const agents = dir.agents || [];
+    if (agents.length === 0) return;
+
+    pushLog(`Directory: <span class="log-highlight">${agents.length}</span> persisted agent${agents.length !== 1 ? 's' : ''}`);
+
+    // Hydrate scene + sidebar from KV snapshot (before NATS connects)
+    agents.forEach(agent => {
+      if (knownAgents.has(agent.peerId)) return;
+
+      const label = agent.agentName || agent.peerId.slice(0, 8);
+      const idx = nodes.length;
+      addNode(label, idx, nodes.length + agents.length);
+      knownAgents.set(agent.peerId, { index: idx, data: agent });
+
+      // Sidebar card
+      renderNatsAgentCard(agent);
+    });
+
+    // Build connections between directory agents sharing rooms
+    const agentArr = Array.from(knownAgents.values());
+    for (let i = 0; i < agentArr.length; i++) {
+      for (let j = i + 1; j < agentArr.length; j++) {
+        const a = agentArr[i].data;
+        const b = agentArr[j].data;
+        const shared = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
+        if (shared.length > 0) addConnection(agentArr[i].index, agentArr[j].index);
+      }
+    }
+
+    blinkAllNodes();
+    setDial('dial-peers-arc', 'dial-peers-val', (agents.length / 100) * 100, String(agents.length));
+  } catch { /* directory unavailable — NATS will handle it */ }
+}
+
+// Write accumulated NATS + directory state back to KV every 60s
+// This persists the view for the next visitor. Max 1 write/60s.
+function startDirectoryWriteback() {
+  setInterval(async () => {
+    if (natsAgents.size === 0 && knownAgents.size === 0) return;
+
+    // Merge all known agents from NATS + directory
+    const allAgents = [];
+    const seen = new Set();
+
+    for (const [peerId, ann] of natsAgents) {
+      if (seen.has(peerId)) continue;
+      seen.add(peerId);
+      allAgents.push({
+        peerId,
+        agentName: ann.agentName || 'anon',
+        multiaddrs: ann.multiaddrs || [],
+        rooms: ann.rooms || [],
+        nknAddress: ann.nknAddress || undefined,
+      });
+    }
+
+    // Also include directory-loaded agents not seen via NATS
+    for (const [peerId, entry] of knownAgents) {
+      if (seen.has(peerId)) continue;
+      seen.add(peerId);
+      allAgents.push({
+        peerId,
+        agentName: entry.data?.agentName || 'anon',
+        multiaddrs: entry.data?.multiaddrs || [],
+        rooms: entry.data?.rooms || [],
+        nknAddress: entry.data?.nknAddress || undefined,
+      });
+    }
+
+    if (allAgents.length === 0) return;
+
+    try {
+      await fetch('/api/v1/directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(allAgents[0]), // post one agent at a time, worker aggregates
+      });
+    } catch { /* silent */ }
+  }, 60_000);
+}
+
 // Initialise
 pushLog('Fetching network state...');
 
+// 1. Load KV directory snapshot first (instant, persisted)
+loadDirectory();
+
+// 2. Fetch bootstrap + metrics
 fetchBootstrap().then(() => {
   fetchNetwork();
   setInterval(fetchNetwork, 10000);
 });
+
+// 3. Start KV writeback (1 write per 60s max)
+startDirectoryWriteback();
 
 // ─────────────────────────────────────────────
 //  NATS BROWSER CONNECTION — live agent discovery

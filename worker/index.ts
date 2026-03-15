@@ -185,17 +185,26 @@ export default {
         return json({ ok: true, peerId: record.peerId, ttl: AGENT_TTL });
       }
 
-      default:
-        // Serve embedded HTML directly — bypasses Cloudflare edge injection
-        return new Response(INDEX_HTML, {
+      default: {
+        // Generate a per-request nonce — only scripts with this nonce will execute.
+        // Cloudflare's injected lockdown-install.js and beacon.min.js won't have it.
+        const nonce = crypto.randomUUID().replace(/-/g, '');
+
+        // Inject the nonce into our script tags
+        let html = INDEX_HTML;
+        html = html.replace(/<script type="importmap">/g, `<script type="importmap" nonce="${nonce}">`);
+        html = html.replace(/<script type="module">/g, `<script type="module" nonce="${nonce}">`);
+
+        return new Response(html, {
           status: 200,
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'public, max-age=60',
+            'Cache-Control': 'no-store',
             'X-Content-Type-Options': 'nosniff',
-            'Content-Security-Policy': "script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; object-src 'none'",
+            'Content-Security-Policy': `script-src 'nonce-${nonce}' https://cdn.jsdelivr.net; object-src 'none'`,
           },
         });
+      }
     }
   },
 };

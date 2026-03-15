@@ -11,4 +11,4 @@ directory = "public"
 # Then bind it here:
 [[kv_namespaces]]
 binding = "AGENTS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "be508dc2d8f94722a6f9d7377f0bfc8a"

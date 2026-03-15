@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenAgents Nexus — Decentralized Agent Mesh</title>
+<title>openagents.nexus</title>
 <meta name="description" content="Decentralized agent-to-agent communication. No servers. No accounts. No surveillance.">
 
 <script type="importmap">
@@ -26,9 +26,9 @@
     --grey-border: #333333;
     --grey-muted: #444444;
     --grey-dim: #888888;
-    --green: #00ff88;
-    --green-dim: #00cc6a;
-    --green-glow: rgba(0,255,136,0.15);
+    --green: #ffffff;
+    --green-dim: #cccccc;
+    --green-glow: rgba(255,255,255,0.15);
     --font: 'Courier New', 'SF Mono', 'Fira Code', monospace;
     --sidebar-w: 260px;
     --sidebar-r: 280px;
@@ -70,7 +70,7 @@
     background: rgba(0,0,0,0.7);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--panel-border);
+    border-bottom: none;
   }
 
   #header .logo {
@@ -87,15 +87,15 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: rgba(0,255,136,0.06);
-    border: 1px solid rgba(0,255,136,0.3);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.2);
     padding: 6px 12px;
     cursor: pointer;
     user-select: none;
     transition: background 0.2s;
     flex-shrink: 0;
   }
-  #header .install-box:hover { background: rgba(0,255,136,0.12); }
+  #header .install-box:hover { background: rgba(255,255,255,0.12); }
   #header .install-box code {
     color: var(--white);
     font-size: 12px;
@@ -131,31 +131,16 @@
   }
   #header .nav-links a:hover { color: var(--white); }
 
-  #tagline {
-    position: fixed;
-    top: var(--header-h);
-    left: 0; right: 0;
-    z-index: 99;
-    text-align: center;
-    padding: 5px 0;
-    font-size: 10px;
-    color: var(--grey-dim);
-    letter-spacing: 0.12em;
-    background: rgba(0,0,0,0.5);
-    border-bottom: 1px solid rgba(255,255,255,0.03);
-  }
-  #tagline span { color: var(--green); }
-
   /* ── LEFT SIDEBAR ── */
   #sidebar-left {
     position: fixed;
-    top: calc(var(--header-h) + 22px);
+    top: var(--header-h);
     left: 0;
     bottom: var(--bottom-h);
     width: var(--sidebar-w);
     z-index: 50;
     background: var(--panel-bg);
-    border-right: 1px solid var(--panel-border);
+    border-right: none;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -163,13 +148,13 @@
 
   #sidebar-right {
     position: fixed;
-    top: calc(var(--header-h) + 22px);
+    top: var(--header-h);
     right: 0;
     bottom: var(--bottom-h);
     width: var(--sidebar-r);
     z-index: 50;
     background: var(--panel-bg);
-    border-left: 1px solid var(--panel-border);
+    border-left: none;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -197,92 +182,73 @@
     flex-shrink: 0;
   }
 
-  /* ── MODEL CARDS ── */
-  #models-list {
+  /* ── PEER CARDS ── */
+  #nodes-list {
     flex: 1;
     overflow-y: auto;
     padding: 8px;
     scrollbar-width: thin;
     scrollbar-color: var(--grey-muted) transparent;
   }
-  #models-list::-webkit-scrollbar { width: 4px; }
-  #models-list::-webkit-scrollbar-thumb { background: var(--grey-muted); border-radius: 2px; }
+  #nodes-list::-webkit-scrollbar { width: 4px; }
+  #nodes-list::-webkit-scrollbar-thumb { background: var(--grey-muted); border-radius: 2px; }
 
-  .model-card {
-    border: 1px solid var(--grey-border);
-    padding: 8px 10px;
-    margin-bottom: 6px;
-    background: rgba(255,255,255,0.02);
-    transition: border-color 0.2s, background 0.2s;
+  .peer-card {
+    border: none;
+    padding: 6px 10px;
+    margin-bottom: 2px;
+    background: transparent;
+    transition: background 0.2s;
     cursor: default;
   }
-  .model-card:hover {
-    border-color: var(--grey-muted);
+  .peer-card:hover {
     background: rgba(255,255,255,0.04);
   }
-  .model-card.active {
-    border-color: rgba(0,255,136,0.4);
-    background: rgba(0,255,136,0.04);
-  }
 
-  .model-name {
+  .peer-name {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-bottom: 6px;
   }
-  .model-dot {
+  .peer-dot {
     width: 6px; height: 6px;
     border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 5px var(--green);
     flex-shrink: 0;
   }
-  .model-name-text {
+  .peer-name-text {
     font-size: 11px;
     color: var(--white);
     font-weight: bold;
     letter-spacing: 0.04em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .model-meta {
+  .peer-meta {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 2px 8px;
-    margin-bottom: 7px;
   }
-  .model-meta-item {
+  .peer-meta-item {
     font-size: 9px;
     color: var(--grey-dim);
   }
-  .model-meta-item span {
-    color: var(--grey-dim);
-  }
-  .model-meta-item strong {
+  .peer-meta-item strong {
     color: #aaa;
     font-weight: normal;
   }
 
-  .model-bar-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .model-bar {
-    flex: 1;
-    height: 4px;
-    background: var(--grey-mid);
-    overflow: hidden;
-  }
-  .model-bar-fill {
-    height: 100%;
-    background: var(--green);
-    transition: width 1s ease;
-  }
-  .model-bar-pct {
-    font-size: 9px;
-    color: var(--green);
-    width: 28px;
-    text-align: right;
-    flex-shrink: 0;
+  .empty-state {
+    padding: 20px 14px;
+    font-size: 10px;
+    color: var(--grey-dim);
+    letter-spacing: 0.08em;
+    text-align: center;
+    line-height: 1.8;
   }
 
   /* ── ACTIVITY LOG ── */
@@ -304,12 +270,13 @@
   .log-entry {
     display: flex;
     gap: 6px;
-    padding: 2px 4px;
+    padding: 3px 4px;
     opacity: 0;
     animation: fadeInLog 0.4s ease forwards;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-break: break-all;
+    min-height: 18px;
+    flex-shrink: 0;
   }
   @keyframes fadeInLog {
     from { opacity: 0; transform: translateX(-6px); }
@@ -319,9 +286,8 @@
   .log-arrow { color: var(--grey-muted); flex-shrink: 0; }
   .log-text { color: #ccc; overflow: hidden; text-overflow: ellipsis; }
   .log-text .log-highlight { color: var(--white); }
-  .log-text .log-peer { color: #7dd3fc; }
-  .log-text .log-cid  { color: #c4b5fd; }
-  .log-text .log-room { color: #fde68a; }
+  .log-text .log-peer { color: #aaaaaa; }
+  .log-text .log-room { color: #aaaaaa; }
 
   /* ── BOTTOM METRICS ── */
   #bottom-bar {
@@ -330,7 +296,7 @@
     height: var(--bottom-h);
     z-index: 50;
     background: var(--panel-bg);
-    border-top: 1px solid var(--panel-border);
+    border-top: none;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -409,7 +375,7 @@
     top: calc(var(--header-h) + 30px);
     left: 50%;
     transform: translateX(-50%) translateY(-8px);
-    background: var(--green);
+    background: var(--white);
     color: #000;
     font-size: 11px;
     padding: 6px 14px;
@@ -466,9 +432,9 @@
   <div class="logo" aria-label="OpenAgents Nexus">OPENAGENTS NEXUS</div>
 
   <div class="install-box" id="install-box" role="button" tabindex="0"
-       aria-label="Copy install command: npm i -g open-agents-nexus"
+       aria-label="Copy install command: npm i open-agents-nexus"
        title="Click to copy">
-    <code>npm i -g open-agents-nexus</code>
+    <code>npm i open-agents-nexus</code>
     <button class="copy-btn" id="copy-btn" aria-label="Copy to clipboard" tabindex="-1">[copy]</button>
   </div>
 
@@ -479,17 +445,20 @@
   </nav>
 </header>
 
-<div id="tagline" aria-label="Tagline">
-  Decentralized agent mesh &nbsp;•&nbsp; <span>Zero config</span> &nbsp;•&nbsp; E2E encrypted &nbsp;•&nbsp; <span>AGPL-3.0</span>
-</div>
+<!-- no tagline -->
 
 <!-- COPY TOAST -->
 <div id="copy-toast" role="status" aria-live="polite">Copied!</div>
 
 <!-- LEFT SIDEBAR -->
-<aside id="sidebar-left" aria-label="Models on network">
-  <div class="sidebar-header">Models on Network</div>
-  <div id="models-list" role="list"></div>
+<aside id="sidebar-left" aria-label="Network nodes">
+  <div class="sidebar-header">Network Nodes</div>
+  <input type="text" id="node-search" placeholder="search nodes..." autocomplete="off" style="
+    width: calc(100% - 16px); margin: 6px 8px 4px; padding: 5px 8px;
+    background: rgba(255,255,255,0.04); border: none; color: #fff;
+    font-family: var(--font); font-size: 10px; outline: none;
+  ">
+  <div id="nodes-list" role="list"></div>
 </aside>
 
 <!-- RIGHT SIDEBAR -->
@@ -546,7 +515,7 @@
         <circle class="dial-track"    cx="32" cy="32" r="26"/>
         <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-uptime-arc"/>
       </svg>
-      <div class="dial-center-text" id="dial-uptime-val">0%</div>
+      <div class="dial-center-text" id="dial-uptime-val">0s</div>
     </div>
     <div class="dial-label">Uptime</div>
   </div>
@@ -560,63 +529,41 @@ import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 // ─────────────────────────────────────────────
-//  CONSTANTS & DEMO DATA
+//  API
 // ─────────────────────────────────────────────
-const AGENT_DATA = [
-  { name: 'GPT-4o',       params: '200B',  vram: '80GB',  size: 2.2,  color: 0xffffff },
-  { name: 'Claude-3.5',   params: '137B',  vram: '70GB',  size: 1.9,  color: 0xeeeeee },
-  { name: 'Llama-3-70B',  params: '70B',   vram: '40GB',  size: 1.5,  color: 0xdddddd },
-  { name: 'Mistral-7B',   params: '7B',    vram: '14GB',  size: 0.85, color: 0xbbbbbb },
-  { name: 'Gemma-2-9B',   params: '9B',    vram: '18GB',  size: 0.95, color: 0xaaaaaa },
-  { name: 'Qwen2-72B',    params: '72B',   vram: '40GB',  size: 1.55, color: 0xcccccc },
-  { name: 'DeepSeek-R1',  params: '671B',  vram: '160GB', size: 2.6,  color: 0xffffff },
-  { name: 'Phi-4-Mini',   params: '3.8B',  vram: '8GB',   size: 0.65, color: 0x999999 },
-  { name: 'Research-Bot', params: '13B',   vram: '16GB',  size: 1.05, color: 0xbbbbbb },
-  { name: 'DataMiner',    params: '8B',    vram: '12GB',  size: 0.8,  color: 0xaaaaaa },
-  { name: 'Coder-34B',    params: '34B',   vram: '24GB',  size: 1.25, color: 0xcccccc },
-  { name: 'VisionLM',     params: '26B',   vram: '20GB',  size: 1.15, color: 0xbbbbbb },
-];
-
-const MODEL_CARD_DATA = [
-  { name: 'DeepSeek-R1',  params: '671B',  vram: '160GB', providers: 5, avail: 88, active: true  },
-  { name: 'GPT-4o',       params: '200B',  vram: '80GB',  providers: 4, avail: 72, active: true  },
-  { name: 'Claude-3.5',   params: '137B',  vram: '70GB',  providers: 4, avail: 79, active: false },
-  { name: 'Llama-3-70B',  params: '70B',   vram: '40GB',  providers: 7, avail: 95, active: true  },
-  { name: 'Qwen2-72B',    params: '72B',   vram: '40GB',  providers: 3, avail: 61, active: false },
-  { name: 'Coder-34B',    params: '34B',   vram: '24GB',  providers: 2, avail: 44, active: false },
-  { name: 'Research-Bot', params: '13B',   vram: '16GB',  providers: 6, avail: 83, active: true  },
-  { name: 'Mistral-7B',   params: '7B',    vram: '14GB',  providers: 9, avail: 97, active: true  },
-  { name: 'Phi-4-Mini',   params: '3.8B',  vram: '8GB',   providers: 5, avail: 91, active: false },
-];
+const API = {
+  bootstrap: '/api/v1/bootstrap',
+  network:   '/api/v1/network',
+  rooms:     '/api/v1/rooms',
+};
 
 // ─────────────────────────────────────────────
 //  THREE.JS SETUP
 // ─────────────────────────────────────────────
-const canvas  = document.getElementById('three-canvas');
+const canvas   = document.getElementById('three-canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
-const scene  = new THREE.Scene();
+const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 scene.fog = new THREE.FogExp2(0x000000, 0.028);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 300);
 camera.position.set(0, 4, 22);
 
-// OrbitControls
 const controls = new OrbitControls(camera, canvas);
-controls.enableDamping    = true;
-controls.dampingFactor    = 0.06;
-controls.minDistance      = 8;
-controls.maxDistance      = 60;
-controls.autoRotate       = true;
-controls.autoRotateSpeed  = 0.25;
-controls.enablePan        = false;
-controls.maxPolarAngle    = Math.PI * 0.8;
-controls.minPolarAngle    = Math.PI * 0.15;
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.06;
+controls.minDistance     = 8;
+controls.maxDistance     = 60;
+controls.autoRotate      = true;
+controls.autoRotateSpeed = 0.25;
+controls.enablePan       = false;
+controls.maxPolarAngle   = Math.PI * 0.8;
+controls.minPolarAngle   = Math.PI * 0.15;
 
 // ─────────────────────────────────────────────
 //  POST-PROCESSING — BLOOM
@@ -626,24 +573,22 @@ composer.addPass(new RenderPass(scene, camera));
 
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  1.6,   // strength
-  0.45,  // radius
-  0.08   // threshold
+  2.5,  // strength — intense
+  0.15, // radius — tight, concentrated glow
+  0.02  // threshold — everything blooms
 );
 composer.addPass(bloomPass);
 
-// ─────────────────────────────────────────────
-//  AMBIENT / SUBTLE LIGHTING
-// ─────────────────────────────────────────────
 scene.add(new THREE.AmbientLight(0x111111, 1));
 
 // ─────────────────────────────────────────────
-//  STAR FIELD (background)
+//  STAR FIELD
 // ─────────────────────────────────────────────
 (function buildStars() {
   const count = 1400;
   const geo   = new THREE.BufferGeometry();
   const pos   = new Float32Array(count * 3);
+  // Use a seeded-ish approach: deterministic enough, no simulation dependency
   for (let i = 0; i < count; i++) {
     pos[i*3  ] = (Math.random() - 0.5) * 240;
     pos[i*3+1] = (Math.random() - 0.5) * 160;
@@ -655,15 +600,22 @@ scene.add(new THREE.AmbientLight(0x111111, 1));
 })();
 
 // ─────────────────────────────────────────────
-//  AGENT NODE SPHERES
+//  NODE MANAGEMENT
 // ─────────────────────────────────────────────
-const agents     = [];
-const agentGroup = new THREE.Group();
-scene.add(agentGroup);
+const nodes      = [];  // { mesh, mat, light, sprite, basePos, orbitAngle, orbitSpeed, orbitAxis, orbitRadius, pulsePhase, birthTime }
+const nodeGroup  = new THREE.Group();
+scene.add(nodeGroup);
 
-// Distribute nodes on a sphere surface with some randomness
-function fibonacci_sphere(n, i) {
-  const phi   = Math.acos(1 - 2*(i+0.5)/n);
+const connGroup     = new THREE.Group();
+scene.add(connGroup);
+const particleGroup = new THREE.Group();
+scene.add(particleGroup);
+
+const connections = []; // { curve, line, particles, ia, ib }
+
+// Fibonacci sphere distribution — deterministic given n and i
+function fibonacciSphere(n, i) {
+  const phi   = Math.acos(1 - 2 * (i + 0.5) / n);
   const theta = Math.PI * (1 + Math.sqrt(5)) * i;
   return new THREE.Vector3(
     Math.sin(phi) * Math.cos(theta),
@@ -673,66 +625,15 @@ function fibonacci_sphere(n, i) {
 }
 
 const ORBIT_RADIUS = 7.5;
-
-AGENT_DATA.forEach((data, i) => {
-  const basePos = fibonacci_sphere(AGENT_DATA.length, i).multiplyScalar(ORBIT_RADIUS);
-  // slight random offset
-  basePos.x += (Math.random() - 0.5) * 2.5;
-  basePos.y += (Math.random() - 0.5) * 2.5;
-  basePos.z += (Math.random() - 0.5) * 2.5;
-
-  const geo  = new THREE.SphereGeometry(data.size * 0.26, 24, 24);
-  const mat  = new THREE.MeshStandardMaterial({
-    color:     data.color,
-    emissive:  new THREE.Color(0x00ff88),
-    emissiveIntensity: 0.12 + Math.random() * 0.15,
-    roughness: 0.3,
-    metalness: 0.6,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(basePos);
-
-  // Scale-up entrance animation
-  mesh.scale.setScalar(0.001);
-
-  // Point light per node (soft glow)
-  const light = new THREE.PointLight(0x00ff88, 0.35, 8);
-  light.position.copy(basePos);
-  agentGroup.add(light);
-
-  agentGroup.add(mesh);
-
-  // Label sprite
-  const sprite = makeLabelSprite(data.name);
-  sprite.position.copy(basePos);
-  sprite.position.y += data.size * 0.26 + 0.55;
-  agentGroup.add(sprite);
-
-  agents.push({
-    mesh, mat, light, sprite,
-    basePos:    basePos.clone(),
-    orbitAngle: Math.random() * Math.PI * 2,
-    orbitSpeed: 0.003 + Math.random() * 0.004,
-    orbitAxis:  new THREE.Vector3(
-      Math.random() - 0.5,
-      Math.random() - 0.5,
-      Math.random() - 0.5
-    ).normalize(),
-    orbitRadius: 0.4 + Math.random() * 0.8,
-    data,
-    pulsePhase: Math.random() * Math.PI * 2,
-    birthTime:  performance.now() + i * 120,
-    alive: true,
-  });
-});
+const NODE_SIZE    = 0.08; // small spheres — like neurons
 
 function makeLabelSprite(text) {
-  const cv = document.createElement('canvas');
+  const cv  = document.createElement('canvas');
   cv.width  = 256;
   cv.height = 48;
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, 256, 48);
-  ctx.font = 'bold 18px Courier New';
+  ctx.font      = 'bold 18px Courier New';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.textAlign = 'center';
   ctx.fillText(text, 128, 30);
@@ -743,114 +644,138 @@ function makeLabelSprite(text) {
   return spr;
 }
 
-// ─────────────────────────────────────────────
-//  CONNECTIONS (splines + particles)
-// ─────────────────────────────────────────────
-const connections   = [];
-const connGroup     = new THREE.Group();
-scene.add(connGroup);
-const particleGroup = new THREE.Group();
-scene.add(particleGroup);
+function addNode(label, index, total) {
+  const basePos = fibonacciSphere(Math.max(total, 1), index).multiplyScalar(ORBIT_RADIUS);
 
-function buildConnections() {
-  // Clear old
-  while (connGroup.children.length) connGroup.remove(connGroup.children[0]);
-  while (particleGroup.children.length) particleGroup.remove(particleGroup.children[0]);
-  connections.length = 0;
+  // Slight deterministic-looking jitter based on index
+  const jitter = 1.5;
+  const seed   = index * 2.399963; // golden angle-ish
+  basePos.x += Math.sin(seed * 3.1) * jitter;
+  basePos.y += Math.cos(seed * 2.7) * jitter;
+  basePos.z += Math.sin(seed * 1.9) * jitter;
 
-  const n = agents.length;
-  for (let i = 0; i < n; i++) {
-    for (let j = i+1; j < n; j++) {
-      if (Math.random() > 0.55) continue; // ~45% density
-      addConnection(i, j);
-    }
-  }
+  const geo = new THREE.SphereGeometry(NODE_SIZE, 24, 24);
+  const mat = new THREE.MeshStandardMaterial({
+    color:            0xffffff,
+    emissive:         new THREE.Color(0xffffff),
+    emissiveIntensity: 0.14,
+    roughness:        0.3,
+    metalness:        0.6,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(basePos);
+  mesh.scale.setScalar(0.001); // animate in
+
+  const light = new THREE.PointLight(0xffffff, 0.3, 7);
+  light.position.copy(basePos);
+  nodeGroup.add(light);
+  nodeGroup.add(mesh);
+
+  const sprite = makeLabelSprite(label);
+  sprite.position.copy(basePos);
+  sprite.position.y += NODE_SIZE + 0.55;
+  sprite.material.opacity = 0;
+  nodeGroup.add(sprite);
+
+  const orbitAxis = new THREE.Vector3(
+    Math.sin(seed * 1.3),
+    Math.cos(seed * 2.1),
+    Math.sin(seed * 0.7)
+  ).normalize();
+
+  const node = {
+    mesh,
+    mat,
+    light,
+    sprite,
+    basePos:     basePos.clone(),
+    orbitAngle:  seed % (Math.PI * 2),
+    orbitSpeed:  0.003 + (index % 7) * 0.0005,
+    orbitAxis,
+    orbitRadius: 0.4 + (index % 5) * 0.12,
+    pulsePhase:  seed % (Math.PI * 2),
+    birthTime:   performance.now() + index * 100,
+  };
+
+  nodes.push(node);
+  return node;
 }
 
 function addConnection(ia, ib) {
-  const a = agents[ia];
-  const b = agents[ib];
+  if (ia >= nodes.length || ib >= nodes.length) return;
+  const a = nodes[ia];
+  const b = nodes[ib];
 
-  const mid = new THREE.Vector3().addVectors(a.mesh.position, b.mesh.position).multiplyScalar(0.5);
-  const offset = new THREE.Vector3(
-    (Math.random() - 0.5) * 3,
-    (Math.random() - 0.5) * 3,
-    (Math.random() - 0.5) * 3
-  );
-  mid.add(offset);
+  const mid    = new THREE.Vector3().addVectors(a.mesh.position, b.mesh.position).multiplyScalar(0.5);
+  const seed   = (ia * 31 + ib * 17) % 100;
+  mid.x += Math.sin(seed * 0.4) * 2;
+  mid.y += Math.cos(seed * 0.6) * 2;
+  mid.z += Math.sin(seed * 0.3) * 2;
 
-  const curve = new THREE.QuadraticBezierCurve3(
+  // Second control point for organic S-curve
+  const mid2 = mid.clone();
+  mid2.x -= Math.cos(seed * 0.8) * 1.5;
+  mid2.y += Math.sin(seed * 0.5) * 1.5;
+  mid2.z -= Math.sin(seed * 0.9) * 1.5;
+
+  const curve = new THREE.CubicBezierCurve3(
     a.mesh.position.clone(),
     mid,
+    mid2,
     b.mesh.position.clone()
   );
 
-  const pts  = curve.getPoints(48);
+  const pts  = curve.getPoints(64);
   const geo  = new THREE.BufferGeometry().setFromPoints(pts);
-  const isGreen = Math.random() < 0.25;
-  const mat  = new THREE.LineBasicMaterial({
-    color: isGreen ? 0x00ff88 : 0x555555,
+  const isGreen = (ia + ib) % 4 === 0;
+  const lineMat = new THREE.LineBasicMaterial({
+    color:       isGreen ? 0xffffff : 0x555555,
     transparent: true,
-    opacity: isGreen ? 0.35 : 0.18,
-    depthWrite: false,
+    opacity:     isGreen ? 0.35 : 0.18,
+    depthWrite:  false,
   });
-  const line = new THREE.Line(geo, mat);
+  const line = new THREE.Line(geo, lineMat);
   connGroup.add(line);
 
-  // Travelling particles along this connection
-  const particleCount = 1 + Math.floor(Math.random() * 3);
-  const particles = [];
+  const particleCount = 1 + (ia % 3);
+  const particles     = [];
   for (let p = 0; p < particleCount; p++) {
-    const pgeo = new THREE.SphereGeometry(0.045, 6, 6);
-    const pmat = new THREE.MeshBasicMaterial({
-      color: 0x00ff88,
-      transparent: true,
-      opacity: 0.85,
-    });
+    const pgeo  = new THREE.SphereGeometry(0.025, 4, 4);
+    const pmat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
     const pmesh = new THREE.Mesh(pgeo, pmat);
     pmesh.renderOrder = 1;
     particleGroup.add(pmesh);
-    particles.push({
-      mesh: pmesh,
-      t:    Math.random(),
-      speed: 0.003 + Math.random() * 0.006,
-    });
+    particles.push({ mesh: pmesh, t: (p / particleCount), speed: 0.003 + (ib % 5) * 0.001 });
   }
 
-  connections.push({ curve, line, particles, ia, ib, age: 0 });
+  connections.push({ curve, line, particles, ia, ib });
 }
 
-buildConnections();
+function buildConnections() {
+  // Clear existing
+  while (connGroup.children.length)     connGroup.remove(connGroup.children[0]);
+  while (particleGroup.children.length) particleGroup.remove(particleGroup.children[0]);
+  connections.length = 0;
 
-// Periodically mutate connections (add/remove) to simulate live network
-let lastConnMutate = 0;
-function mutateConnections(now) {
-  if (now - lastConnMutate < 4000) return;
-  lastConnMutate = now;
+  const n = nodes.length;
+  if (n < 2) return;
 
-  // Remove 1–2 random connections
-  const toRemove = 1 + Math.floor(Math.random() * 2);
-  for (let r = 0; r < toRemove && connections.length > 6; r++) {
-    const idx = Math.floor(Math.random() * connections.length);
-    const c = connections.splice(idx, 1)[0];
-    connGroup.remove(c.line);
-    c.particles.forEach(p => particleGroup.remove(p.mesh));
-  }
-
-  // Add 1–2 new random connections
-  const toAdd = 1 + Math.floor(Math.random() * 2);
-  for (let a = 0; a < toAdd; a++) {
-    const ia = Math.floor(Math.random() * agents.length);
-    let   ib = Math.floor(Math.random() * agents.length);
-    if (ib === ia) ib = (ia + 1) % agents.length;
-    addConnection(ia, ib);
+  // Connect every bootstrap peer to its neighbours in a ring, plus a few cross-links
+  // This reflects reality: they're all in the same bootstrap network
+  for (let i = 0; i < n; i++) {
+    // Ring connection
+    addConnection(i, (i + 1) % n);
+    // Every 3rd node gets a cross-link to a non-adjacent peer
+    if (i % 3 === 0) {
+      const target = (i + Math.floor(n / 3)) % n;
+      if (target !== i) addConnection(i, target);
+    }
   }
 }
 
 // ─────────────────────────────────────────────
 //  ANIMATION LOOP
 // ─────────────────────────────────────────────
-let idleTimer = 0;
 let lastInteract = performance.now();
 
 canvas.addEventListener('pointerdown', () => {
@@ -863,62 +788,52 @@ function animate() {
   const now = performance.now();
   const t   = now * 0.001;
 
-  // Re-enable auto-rotate after 4s idle
   if (now - lastInteract > 4000) controls.autoRotate = true;
 
-  // Entrance scale animation + node drift
-  agents.forEach((ag, i) => {
-    if (!ag.alive) return;
-
-    // Entrance
-    if (now < ag.birthTime + 600) {
-      const p = Math.max(0, (now - ag.birthTime) / 600);
+  nodes.forEach((nd) => {
+    // Entrance animation
+    if (now < nd.birthTime + 600) {
+      const p    = Math.max(0, (now - nd.birthTime) / 600);
       const ease = 1 - Math.pow(1 - p, 3);
-      ag.mesh.scale.setScalar(ease);
-      ag.sprite.material.opacity = ease;
+      nd.mesh.scale.setScalar(ease);
+      nd.sprite.material.opacity = ease;
       return;
     }
-    ag.mesh.scale.setScalar(1);
-    ag.sprite.material.opacity = 1;
+    nd.mesh.scale.setScalar(1);
+    nd.sprite.material.opacity = 1;
 
-    // Gentle orbit drift around base position
-    ag.orbitAngle += ag.orbitSpeed;
-    const axis   = ag.orbitAxis;
-    const q      = new THREE.Quaternion().setFromAxisAngle(axis, ag.orbitAngle);
-    const drift  = new THREE.Vector3(ag.orbitRadius, 0, 0).applyQuaternion(q);
-    ag.mesh.position.copy(ag.basePos).add(drift);
+    // Gentle orbit drift
+    nd.orbitAngle += nd.orbitSpeed;
+    const q     = new THREE.Quaternion().setFromAxisAngle(nd.orbitAxis, nd.orbitAngle);
+    const drift = new THREE.Vector3(nd.orbitRadius, 0, 0).applyQuaternion(q);
+    nd.mesh.position.copy(nd.basePos).add(drift);
 
-    // Sync light and label
-    ag.light.position.copy(ag.mesh.position);
-    ag.sprite.position.copy(ag.mesh.position).y += ag.data.size * 0.26 + 0.55;
+    nd.light.position.copy(nd.mesh.position);
+    nd.sprite.position.copy(nd.mesh.position);
+    nd.sprite.position.y += NODE_SIZE + 0.55;
 
-    // Pulse emissive
-    ag.mat.emissiveIntensity = 0.08 + 0.12 * Math.sin(t * 1.8 + ag.pulsePhase);
+    nd.mat.emissiveIntensity = 0.08 + 0.12 * Math.sin(t * 1.8 + nd.pulsePhase);
   });
 
-  // Update connection lines (follow drifting nodes)
+  // Update connection curves and particles
   connections.forEach(c => {
-    const a = agents[c.ia];
-    const b = agents[c.ib];
-    const mid = new THREE.Vector3().addVectors(a.mesh.position, b.mesh.position).multiplyScalar(0.5);
-    // slight curve offset maintained by recreating — skip full rebuild, just update particles
+    if (c.ia >= nodes.length || c.ib >= nodes.length) return;
+    const a = nodes[c.ia];
+    const b = nodes[c.ib];
+
     c.curve.v0.copy(a.mesh.position);
     c.curve.v2.copy(b.mesh.position);
 
-    // Update particle positions along curve
     c.particles.forEach(p => {
       p.t += p.speed;
       if (p.t > 1) p.t -= 1;
-      const pos = c.curve.getPoint(p.t);
+      const pos  = c.curve.getPoint(p.t);
       p.mesh.position.copy(pos);
-
-      // Pulse particle opacity with a wave
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
       p.mesh.material.opacity = 0.45 + 0.5 * wave;
     });
   });
 
-  mutateConnections(now);
   controls.update();
   composer.render();
 }
@@ -937,187 +852,284 @@ window.addEventListener('resize', () => {
 });
 
 // ─────────────────────────────────────────────
-//  LEFT SIDEBAR — MODEL CARDS
+//  UI HELPERS
 // ─────────────────────────────────────────────
-const modelsList = document.getElementById('models-list');
-
-const PALETTE = ['#ffffff','#cccccc','#aaaaaa','#888888','#666666'];
-
-MODEL_CARD_DATA.forEach((m, i) => {
-  const card = document.createElement('div');
-  card.className = 'model-card' + (m.active ? ' active' : '');
-  card.setAttribute('role', 'listitem');
-
-  const dotColor = PALETTE[i % PALETTE.length];
-  const bars = '▓'.repeat(Math.round(m.avail / 10)) + '░'.repeat(10 - Math.round(m.avail / 10));
-
-  card.innerHTML = `
-    <div class="model-name">
-      <div class="model-dot" style="background:${dotColor};box-shadow:0 0 5px ${dotColor}40"></div>
-      <div class="model-name-text">${m.name}</div>
-    </div>
-    <div class="model-meta">
-      <div class="model-meta-item">Params: <strong>${m.params}</strong></div>
-      <div class="model-meta-item">VRAM: <strong>${m.vram}</strong></div>
-      <div class="model-meta-item">Providers: <strong>${m.providers}</strong></div>
-    </div>
-    <div class="model-bar-wrap">
-      <div class="model-bar">
-        <div class="model-bar-fill" style="width:0%" data-target="${m.avail}"></div>
-      </div>
-      <div class="model-bar-pct">${m.avail}%</div>
-    </div>
-  `;
-  modelsList.appendChild(card);
-});
-
-// Animate bars in
-setTimeout(() => {
-  document.querySelectorAll('.model-bar-fill').forEach(el => {
-    el.style.width = el.dataset.target + '%';
-  });
-}, 300);
-
-// Periodically jitter availability values
-setInterval(() => {
-  document.querySelectorAll('.model-bar-fill').forEach(el => {
-    const base   = parseInt(el.dataset.target);
-    const jitter = base + Math.floor((Math.random() - 0.5) * 8);
-    const clamped = Math.max(20, Math.min(99, jitter));
-    el.style.width = clamped + '%';
-    const pct = el.closest('.model-bar-wrap').querySelector('.model-bar-pct');
-    if (pct) pct.textContent = clamped + '%';
-  });
-}, 3200);
-
-// ─────────────────────────────────────────────
-//  RIGHT SIDEBAR — ACTIVITY LOG
-// ─────────────────────────────────────────────
-const activityLog  = document.getElementById('activity-log');
-const MAX_LOG = 80;
-
-const PEER_IDS  = ['12D3KooWA1b2','12D3KooWB3c4','12D3KooWC5d6','12D3KooWD7e8','12D3KooWE9f0','12D3KooWF1g2'];
-const ROOMS     = ['#general','#research','#inference','#coding','#data'];
-const CID_PFX   = ['bafyrei','bafkrei','bafybei'];
-const EVENT_TEMPLATES = [
-  (ts) => `<span class="log-peer">${rnd(PEER_IDS)}...</span> joined <span class="log-room">${rnd(ROOMS)}</span>`,
-  (ts) => `<span class="log-peer">${rnd(PEER_IDS)}...</span> → <span class="log-peer">${rnd(PEER_IDS)}...</span> <span style="color:#666">[chat]</span>`,
-  (ts) => `CID <span class="log-cid">${rnd(CID_PFX)}${randHex(6)}...</span> pinned by ${1+Math.floor(Math.random()*4)} peers`,
-  (ts) => `<span class="log-highlight">${rnd(AGENT_DATA).name}</span> offered inference`,
-  (ts) => `Mesh: <span class="log-highlight">${8+Math.floor(Math.random()*6)}</span> peers, <span class="log-highlight">${20+Math.floor(Math.random()*20)}</span> conns`,
-  (ts) => `<span class="log-highlight">${rnd(AGENT_DATA).name}</span> completed task in <span class="log-highlight">${(0.4+Math.random()*2.1).toFixed(2)}s</span>`,
-  (ts) => `DHT record updated for <span class="log-cid">${rnd(CID_PFX)}${randHex(6)}...</span>`,
-  (ts) => `<span class="log-peer">${rnd(PEER_IDS)}...</span> disconnected`,
-  (ts) => `GossipSub: ${20+Math.floor(Math.random()*30)} msgs/s on <span class="log-room">${rnd(ROOMS)}</span>`,
-  (ts) => `x402 payment settled: <span class="log-highlight">0.${Math.floor(Math.random()*9999).toString().padStart(4,'0')}</span> USDC`,
-  (ts) => `Circuit relay established via <span class="log-peer">${rnd(PEER_IDS)}...</span>`,
-  (ts) => `mDNS discovered <span class="log-peer">${rnd(PEER_IDS)}...</span> on LAN`,
-];
-
-function rnd(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function randHex(n) { return Array.from({length:n}, () => '0123456789abcdef'[Math.floor(Math.random()*16)]).join(''); }
+const activityLog = document.getElementById('activity-log');
+const MAX_LOG     = 80;
 
 function nowStr() {
   const d = new Date();
-  return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':');
 }
 
 function pushLog(html) {
   const row = document.createElement('div');
   row.className = 'log-entry';
-  row.innerHTML = `<span class="log-time">${nowStr()}</span><span class="log-arrow">▸</span><span class="log-text">${html}</span>`;
+  row.innerHTML = `<span class="log-time">${nowStr()}</span><span class="log-arrow">&#9656;</span><span class="log-text">${html}</span>`;
   activityLog.appendChild(row);
-
-  // Prune old entries
-  while (activityLog.children.length > MAX_LOG) {
-    activityLog.removeChild(activityLog.firstChild);
-  }
+  while (activityLog.children.length > MAX_LOG) activityLog.removeChild(activityLog.firstChild);
   activityLog.scrollTop = activityLog.scrollHeight;
 }
 
-// Seed initial log
-for (let i = 0; i < 14; i++) {
-  pushLog(rnd(EVENT_TEMPLATES)());
-}
-
-// Live events
-function scheduleNextEvent() {
-  const delay = 800 + Math.random() * 2400;
-  setTimeout(() => {
-    pushLog(rnd(EVENT_TEMPLATES)());
-    scheduleNextEvent();
-  }, delay);
-}
-scheduleNextEvent();
-
 // ─────────────────────────────────────────────
-//  BOTTOM DIALS
+//  DIALS
 // ─────────────────────────────────────────────
-const CIRC = 2 * Math.PI * 26; // circumference for r=26
+const CIRC = 2 * Math.PI * 26; // r=26
 
 function setDial(arcId, valId, pct, displayVal) {
   const arc = document.getElementById(arcId);
   const val = document.getElementById(valId);
   if (!arc || !val) return;
+  const clamped = Math.max(0, Math.min(100, pct));
   arc.style.strokeDasharray  = `${CIRC}`;
-  arc.style.strokeDashoffset = `${CIRC * (1 - pct / 100)}`;
+  arc.style.strokeDashoffset = `${CIRC * (1 - clamped / 100)}`;
   val.textContent = displayVal;
 }
 
-// Target values
-const dialTargets = {
-  peers:  { arc: 'dial-peers-arc',  val: 'dial-peers-val',  value: 12,    max: 30,    fmt: v => Math.round(v) },
-  rooms:  { arc: 'dial-rooms-arc',  val: 'dial-rooms-val',  value: 4,     max: 10,    fmt: v => Math.round(v) },
-  pins:   { arc: 'dial-pins-arc',   val: 'dial-pins-val',   value: 847,   max: 2000,  fmt: v => Math.round(v) },
-  msg:    { arc: 'dial-msg-arc',    val: 'dial-msg-val',    value: 23.4,  max: 60,    fmt: v => v.toFixed(1) },
-  uptime: { arc: 'dial-uptime-arc', val: 'dial-uptime-val', value: 99.7,  max: 100,   fmt: v => v.toFixed(1)+'%' },
-};
+// Initialise all dials at zero
+setDial('dial-peers-arc',  'dial-peers-val',  0, '0');
+setDial('dial-rooms-arc',  'dial-rooms-val',  0, '0');
+setDial('dial-pins-arc',   'dial-pins-val',   0, '0');
+setDial('dial-msg-arc',    'dial-msg-val',    0, '0');
+setDial('dial-uptime-arc', 'dial-uptime-val', 0, '0s');
 
-// Count-up animation on load
-const dialStart = performance.now();
-const DIAL_DURATION = 1800;
-
-function animateDials(ts) {
-  const elapsed = ts - dialStart;
-  const p = Math.min(1, elapsed / DIAL_DURATION);
-  const ease = 1 - Math.pow(1 - p, 3);
-
-  Object.values(dialTargets).forEach(d => {
-    const cur = d.value * ease;
-    setDial(d.arc, d.val, (cur / d.max) * 100, d.fmt(cur));
-  });
-
-  if (p < 1) requestAnimationFrame(animateDials);
+// Format uptime in seconds to a human-readable string
+function formatUptime(seconds) {
+  if (!seconds || seconds <= 0) return '0s';
+  if (seconds < 60)   return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
 }
-requestAnimationFrame(animateDials);
 
-// Live fluctuation
-setInterval(() => {
-  dialTargets.peers.value  = Math.max(6,  Math.min(28,  dialTargets.peers.value  + (Math.random()-0.5)*2));
-  dialTargets.rooms.value  = Math.max(2,  Math.min(9,   dialTargets.rooms.value  + (Math.random()-0.4)));
-  dialTargets.pins.value   = Math.max(500,Math.min(1900,dialTargets.pins.value   + Math.floor(Math.random()*12)));
-  dialTargets.msg.value    = Math.max(5,  Math.min(55,  dialTargets.msg.value    + (Math.random()-0.5)*3));
-  dialTargets.uptime.value = Math.max(98, Math.min(100, dialTargets.uptime.value + (Math.random()-0.5)*0.1));
+// Update dials from network API data
+function updateDials(network, bootstrapPeerCount) {
+  // Peers: prefer API peerCount, fall back to bootstrap count
+  const peers = network.peerCount != null ? network.peerCount : bootstrapPeerCount;
+  // For the arc percentage, treat 100 peers as a reasonable upper bound
+  setDial('dial-peers-arc', 'dial-peers-val', (peers / 100) * 100, String(peers));
 
-  Object.values(dialTargets).forEach(d => {
-    setDial(d.arc, d.val, (d.value / d.max) * 100, d.fmt(d.value));
+  const rooms = network.roomCount || 0;
+  setDial('dial-rooms-arc', 'dial-rooms-val', (rooms / 20) * 100, String(rooms));
+
+  // Pins: not tracked yet — stays 0
+  setDial('dial-pins-arc', 'dial-pins-val', 0, '0');
+
+  const msgRate = network.messageRate || 0;
+  setDial('dial-msg-arc', 'dial-msg-val', (msgRate / 100) * 100, String(msgRate));
+
+  const uptime = network.uptime || 0;
+  // Express as percentage of a 24-hour day for the arc; show human value in center
+  const uptimePct = Math.min(100, (uptime / 86400) * 100);
+  setDial('dial-uptime-arc', 'dial-uptime-val', uptimePct, formatUptime(uptime));
+}
+
+// ─────────────────────────────────────────────
+//  LEFT SIDEBAR — PEER CARDS
+// ─────────────────────────────────────────────
+const nodesList = document.getElementById('nodes-list');
+
+function extractHostname(multiaddr) {
+  // Multiaddr examples:
+  //   /dns4/am6.bootstrap.libp2p.io/tcp/443/wss/p2p/12D3Koo...
+  //   /ip4/104.131.131.82/tcp/4001/p2p/12D3Koo...
+  const dns4 = multiaddr.match(/\/dns4\/([^/]+)/);
+  if (dns4) return dns4[1];
+  const dns6 = multiaddr.match(/\/dns6\/([^/]+)/);
+  if (dns6) return dns6[1];
+  const ip4 = multiaddr.match(/\/ip4\/([^/]+)/);
+  if (ip4) return ip4[1];
+  const ip6 = multiaddr.match(/\/ip6\/([^/]+)/);
+  if (ip6) return ip6[1];
+  return 'unknown';
+}
+
+function extractPeerId(multiaddr) {
+  const match = multiaddr.match(/\/p2p\/([A-Za-z0-9]+)/);
+  return match ? match[1] : null;
+}
+
+function extractTransport(multiaddr) {
+  if (multiaddr.includes('/wss'))  return 'WSS';
+  if (multiaddr.includes('/ws'))   return 'WS';
+  if (multiaddr.includes('/quic')) return 'QUIC';
+  if (multiaddr.includes('/tcp'))  return 'TCP';
+  if (multiaddr.includes('/udp'))  return 'UDP';
+  return 'Unknown';
+}
+
+function extractShortLabel(hostname) {
+  // e.g. "am6.bootstrap.libp2p.io" -> "am6"
+  return hostname.split('.')[0];
+}
+
+function renderPeerCards(bootstrapPeers) {
+  nodesList.innerHTML = '';
+
+  if (!bootstrapPeers || bootstrapPeers.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'No peers discovered';
+    nodesList.appendChild(empty);
+    return;
+  }
+
+  // Deduplicate by peer ID (multiple multiaddrs may share a peer)
+  const seen = new Map(); // peerId -> { hostname, transport, peerId }
+  bootstrapPeers.forEach(addr => {
+    const peerId   = extractPeerId(addr);
+    const hostname = extractHostname(addr);
+    const transport = extractTransport(addr);
+    if (!peerId) return;
+    if (!seen.has(peerId)) {
+      seen.set(peerId, { hostname, transport, peerId });
+    } else {
+      // Prefer WSS transport entry if we see a better one
+      const existing = seen.get(peerId);
+      if (transport === 'WSS' && existing.transport !== 'WSS') {
+        seen.set(peerId, { hostname, transport, peerId });
+      }
+    }
   });
-}, 2800);
+
+  seen.forEach(({ hostname, transport, peerId }) => {
+    const shortId = peerId.slice(0, 12);
+    const card    = document.createElement('div');
+    card.className = 'peer-card';
+    card.setAttribute('role', 'listitem');
+    card.innerHTML = `
+      <div class="peer-name">
+        <div class="peer-dot"></div>
+        <div class="peer-name-text">${hostname}</div>
+      </div>
+      <div class="peer-meta">
+        <div class="peer-meta-item">Role: <strong>Bootstrap</strong></div>
+        <div class="peer-meta-item">Transport: <strong>${transport}</strong></div>
+        <div class="peer-meta-item" style="grid-column:1/-1">PeerId: <strong>${shortId}...</strong></div>
+      </div>
+    `;
+    nodesList.appendChild(card);
+  });
+}
+
+// ─────────────────────────────────────────────
+//  THREE.JS — Build scene from bootstrap peers
+// ─────────────────────────────────────────────
+function buildSceneFromBootstrap(bootstrapPeers) {
+  // Deduplicate peers the same way as sidebar
+  const seen = new Map();
+  bootstrapPeers.forEach(addr => {
+    const peerId   = extractPeerId(addr);
+    const hostname = extractHostname(addr);
+    if (!peerId) return;
+    if (!seen.has(peerId)) seen.set(peerId, { hostname, peerId });
+  });
+
+  const unique = Array.from(seen.values());
+
+  unique.forEach(({ hostname }, i) => {
+    const label = extractShortLabel(hostname);
+    addNode(label, i, unique.length);
+  });
+
+  if (nodes.length >= 2) buildConnections();
+}
+
+// ─────────────────────────────────────────────
+//  NETWORK POLLING — Update scene with extra peers
+// ─────────────────────────────────────────────
+let knownPeerCount = 0;
+
+function reconcileNetworkPeers(network) {
+  const apiCount = network.peerCount || 0;
+  if (apiCount <= nodes.length) return; // nothing new to show
+
+  // Add anonymous peer nodes for any peers beyond bootstrap set
+  const extraCount = apiCount - nodes.length;
+  const totalBefore = nodes.length;
+  for (let i = 0; i < extraCount; i++) {
+    addNode(`peer-${totalBefore + i}`, totalBefore + i, totalBefore + extraCount);
+  }
+  // Rebuild connections to include new nodes
+  buildConnections();
+
+  if (extraCount > 0) {
+    pushLog(`<span class="log-highlight">${extraCount}</span> new peer${extraCount > 1 ? 's' : ''} joined the network`);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  FETCH & POLL
+// ─────────────────────────────────────────────
+let bootstrapPeerCount = 0;
+
+async function fetchBootstrap() {
+  try {
+    const res  = await fetch(API.bootstrap);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const peers = data.peers || [];
+    bootstrapPeerCount = peers.length;
+
+    pushLog('Connected to <span class="log-highlight">openagents.nexus</span> API');
+    pushLog(`Discovered <span class="log-highlight">${bootstrapPeerCount}</span> bootstrap peer${bootstrapPeerCount !== 1 ? 's' : ''}`);
+
+    if (data.network) {
+      const rooms = data.network.roomCount || 0;
+      if (rooms > 0) pushLog(`Found <span class="log-highlight">${rooms}</span> room${rooms !== 1 ? 's' : ''}`);
+    }
+
+    // Build Three.js scene
+    buildSceneFromBootstrap(peers);
+
+    // Build sidebar cards
+    renderPeerCards(peers);
+
+    // Set dials with bootstrap network data
+    if (data.network) updateDials(data.network, bootstrapPeerCount);
+
+    return peers;
+  } catch (err) {
+    pushLog(`<span style="color:#888888">API error: ${err.message}</span>`);
+    return [];
+  }
+}
+
+async function fetchNetwork() {
+  try {
+    const res  = await fetch(API.network);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    updateDials(data, bootstrapPeerCount);
+    reconcileNetworkPeers(data);
+  } catch (err) {
+    // Silent poll failure — don't spam the log
+  }
+}
+
+// Initialise
+pushLog('Fetching network state...');
+
+fetchBootstrap().then(() => {
+  // Poll every 15 seconds for network updates
+  setInterval(fetchNetwork, 15000);
+});
 
 // ─────────────────────────────────────────────
 //  COPY INSTALL COMMAND
 // ─────────────────────────────────────────────
 const installBox = document.getElementById('install-box');
 const copyToast  = document.getElementById('copy-toast');
+const INSTALL_CMD = 'npm i open-agents-nexus';
 
 function doCopy() {
-  navigator.clipboard.writeText('npm i -g open-agents-nexus').then(() => {
+  navigator.clipboard.writeText(INSTALL_CMD).then(() => {
     copyToast.classList.add('show');
     setTimeout(() => copyToast.classList.remove('show'), 2000);
   }).catch(() => {
-    // Fallback
     const ta = document.createElement('textarea');
-    ta.value = 'npm i -g open-agents-nexus';
+    ta.value = INSTALL_CMD;
     ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
@@ -1129,7 +1141,85 @@ function doCopy() {
 }
 
 installBox.addEventListener('click', doCopy);
-installBox.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); } });
+installBox.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+});
+
+// ─────────────────────────────────────────────
+//  NODE SEARCH
+// ─────────────────────────────────────────────
+document.getElementById('node-search').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  document.querySelectorAll('.peer-card').forEach(card => {
+    const text = card.textContent.toLowerCase();
+    card.style.display = text.includes(q) ? '' : 'none';
+  });
+});
+
+// ─────────────────────────────────────────────
+//  REAL SYSTEM CAPABILITY DETECTION
+// ─────────────────────────────────────────────
+(async function detectCapabilities() {
+  const caps = {};
+
+  // CPU cores
+  caps.cores = navigator.hardwareConcurrency || 0;
+
+  // RAM (GB) — navigator.deviceMemory is approximate
+  caps.ramGB = navigator.deviceMemory || 0;
+
+  // GPU info via WebGL
+  try {
+    const cvs = document.createElement('canvas');
+    const gl = cvs.getContext('webgl2') || cvs.getContext('webgl');
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      caps.gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'Unknown';
+      caps.gpuVendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : 'Unknown';
+      caps.webgl = gl instanceof WebGL2RenderingContext ? 'WebGL2' : 'WebGL1';
+    }
+  } catch { caps.gpu = 'Unavailable'; }
+
+  // WebGPU support
+  caps.webgpu = !!navigator.gpu;
+
+  // WebRTC support (needed for P2P)
+  caps.webrtc = !!(window.RTCPeerConnection || window.webkitRTCPeerConnection);
+
+  // WebSocket support
+  caps.websocket = !!window.WebSocket;
+
+  // SharedArrayBuffer (needed for some WASM inference)
+  caps.sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+
+  // WebAssembly
+  caps.wasm = typeof WebAssembly !== 'undefined';
+
+  // Storage estimate
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      caps.storageQuotaGB = ((est.quota || 0) / 1e9).toFixed(1);
+      caps.storageUsedGB = ((est.usage || 0) / 1e9).toFixed(2);
+    }
+  } catch {}
+
+  // Network info
+  if (navigator.connection) {
+    caps.connectionType = navigator.connection.effectiveType || 'unknown';
+    caps.downlinkMbps = navigator.connection.downlink || 0;
+  }
+
+  // Log real capabilities
+  pushLog(`System: <span class="log-highlight">${caps.cores}</span> cores, <span class="log-highlight">${caps.ramGB || '?'}GB</span> RAM`);
+  if (caps.gpu && caps.gpu !== 'Unavailable') {
+    pushLog(`GPU: <span class="log-highlight">${caps.gpu}</span>`);
+  }
+  pushLog(`WebGPU: <span class="log-highlight">${caps.webgpu ? 'yes' : 'no'}</span> | WASM: <span class="log-highlight">${caps.wasm ? 'yes' : 'no'}</span> | WebRTC: <span class="log-highlight">${caps.webrtc ? 'yes' : 'no'}</span>`);
+  if (caps.storageQuotaGB) {
+    pushLog(`Storage: <span class="log-highlight">${caps.storageUsedGB}/${caps.storageQuotaGB}GB</span>`);
+  }
+})();
 </script>
 </body>
 </html>

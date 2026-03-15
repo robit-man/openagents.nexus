@@ -5,6 +5,7 @@
  * agent communication platform.
  */
 
+import * as path from 'node:path';
 import { resolveConfig, type NexusConfig } from './config.js';
 import { resolveIdentity, type IdentityInfo } from './identity/index.js';
 import { createNexusNode } from './node.js';
@@ -12,8 +13,13 @@ import { RoomManager } from './chat/index.js';
 import { createMetaMessage } from './chat/messages.js';
 import { DHTManager } from './dht/index.js';
 import { StorageManager } from './storage/index.js';
-import { fetchBootstrapPeers } from './signaling/onboarding.js';
-import { resolveDiscovery, buildBootstrapList } from './discovery.js';
+import { resolveDiscovery } from './discovery.js';
+import {
+  resolveBootstrap,
+  defaultBootstrapSources,
+  savePeerCache,
+  type BootstrapSource,
+} from './bootstrap/index.js';
 import { createLogger } from './logger.js';
 import { encodeMessage, roomTopic, TOPICS, uuidv7 } from './protocol/index.js';
 import type {
@@ -69,6 +75,11 @@ export interface NexusClientOptions {
   enableCircuitRelay?: boolean;    // Enable circuit relay for NAT traversal
   enablePubsubDiscovery?: boolean; // Enable pubsub-based global peer discovery
   enableMdns?: boolean;            // Enable mDNS for local-network discovery
+
+  // Bootstrap Phase 4: federated multi-source
+  bootstrapSources?: BootstrapSource[]; // Custom ordered source list (overrides defaults)
+  manifestUrls?: string[];              // Signed manifest mirror URLs
+  cachePath?: string;                   // Directory for peer cache persistence
 
   // x402 micropayment rail
   x402?: Partial<X402Config>;
@@ -170,20 +181,37 @@ export class NexusClient {
     });
     log.info(`Identity: ${this.identity.peerId}`);
 
-    // 2. Fetch bootstrap peers from signaling server (Level 1 discovery cascade)
-    let signalingPeers: string[] = [];
-    try {
-      const bootstrapResponse = await fetchBootstrapPeers(this.config.signalingServer);
-      signalingPeers = bootstrapResponse.peers;
-      if (signalingPeers.length > 0) {
-        log.info(`Signaling server provided ${signalingPeers.length} bootstrap peer(s)`);
-      }
-    } catch (err) {
-      log.warn(`Could not reach signaling server: ${err}`);
-      // Continue — lower-level discovery (public bootstrap / mDNS) will handle connectivity
-    }
+    // 2. Resolve the cache path: explicit cachePath > dirname(keyStorePath) > undefined
+    const cachePath =
+      this.config.cachePath ??
+      (this.config.keyStorePath ? path.dirname(this.config.keyStorePath) : undefined);
 
-    // Build the discovery config from NexusConfig fields
+    // 3. Resolve bootstrap peers via federated multi-source manager (Phase 4)
+    //    If the caller supplied a fully custom source list, use it directly.
+    //    Otherwise build the recommended ordered list from available config.
+    const sources: BootstrapSource[] =
+      this.config.bootstrapSources ??
+      defaultBootstrapSources({
+        cachePath,
+        signalingServer: this.config.signalingServer,
+        customPeers: this.config.bootstrapPeers.length > 0
+          ? this.config.bootstrapPeers
+          : undefined,
+        manifestUrls: this.config.manifestUrls,
+      });
+
+    const bootstrapResult = await resolveBootstrap(sources);
+    log.info(
+      `Bootstrap: ${bootstrapResult.peers.length} peers from [${bootstrapResult.sources.join(', ')}]`,
+    );
+
+    // Inject resolved peers back into config so createNexusNode picks them up
+    this.config = resolveConfig({
+      ...this.config,
+      bootstrapPeers: bootstrapResult.peers,
+    });
+
+    // Build discovery config from NexusConfig fields
     const discovery = resolveDiscovery({
       usePublicBootstrap: this.config.usePublicBootstrap,
       enableCircuitRelay: this.config.enableCircuitRelay,
@@ -191,22 +219,12 @@ export class NexusClient {
       enableMdns: this.config.enableMdns,
     });
 
-    // Merge all bootstrap sources and update config so createNexusNode sees them
-    const allBootstrap = buildBootstrapList(discovery, [
-      ...signalingPeers,
-      ...this.config.bootstrapPeers,
-    ]);
-    this.config = resolveConfig({
-      ...this.config,
-      bootstrapPeers: allBootstrap,
-    });
+    // 5. Create and start libp2p node
+    // The resolved bootstrap peers are already in this.config.bootstrapPeers;
+    // pass an empty signalingPeers list since the manager already handled ordering.
+    this.node = await createNexusNode(this.config, this.identity.privateKey, discovery, []);
 
-    // 3. Create and start libp2p node
-    // Pass signalingPeers separately so createNexusNode can correctly place them
-    // at the front of the bootstrap list (highest priority).
-    this.node = await createNexusNode(this.config, this.identity.privateKey, discovery, signalingPeers);
-
-    // 4. Set up peer events
+    // 6. Set up peer events
     this.node.addEventListener('peer:connect', (evt: any) => {
       const remotePeerId = evt.detail.toString();
       log.info(`Peer connected: ${remotePeerId}`);
@@ -270,20 +288,18 @@ export class NexusClient {
         .join(', ')}`,
     );
 
-    // 8. Start heartbeat — report to hub every 30s so the frontend shows this agent
-    this.startHeartbeat();
+    // Save successfully-contacted peers to the disk cache for warm bootstrap next time
+    if (cachePath) {
+      const connectedAddrs = this.node.getMultiaddrs().map((a: any) => a.toString());
+      savePeerCache(cachePath, [...bootstrapResult.peers, ...connectedAddrs]);
+    }
+
   }
 
   async disconnect(): Promise<void> {
     if (!this._isConnected) return;
 
     log.info('Disconnecting...');
-
-    // Stop heartbeat
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
 
     // Leave all rooms
     if (this.roomManager) {
@@ -303,23 +319,7 @@ export class NexusClient {
     log.info('Disconnected');
   }
 
-  // --- Heartbeat: report to hub so frontend shows this agent ---
-
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-
-  private startHeartbeat(): void {
-    // Report immediately, then every 30s
-    this.sendHeartbeat();
-    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), 30_000);
-  }
-
-  private async sendHeartbeat(): Promise<void> {
-    // Heartbeat is P2P-native: presence is announced via GossipSub,
-    // NOT via centralized HTTP POST to avoid KV/quota exhaustion.
-    // The hub's /api/v1/report endpoint is disabled.
-    // Presence is soft-state: peers learn about us through pubsub
-    // discovery topics and direct DHT advertisements.
-  }
+  // Presence is P2P-native via GossipSub/DHT — no centralized heartbeat.
 
   // --- Rooms ---
 
@@ -342,12 +342,10 @@ export class NexusClient {
       createdAt: Date.now(),
       type: options.type ?? 'persistent',
       access: options.access ?? 'public',
-      retention: {
-        policy: 'community-pinned',
-        minPinners: 3,
-        archiveAfterMs: 604_800_000, // 7 days
+      retentionDefaults: {
+        recommendedClass: 'cache',
+        defaultBatchSize: 50,
       },
-      historyRoot: null,
       memberCount: 0,
       previousVersion: null,
     };
@@ -610,6 +608,20 @@ export {
   ephemeralTopic,
 } from './protocol/index.js';
 export { ContentPropagation } from './storage/index.js';
+export {
+  createBatch,
+  signBatch,
+  validateBatchStructure,
+  MAX_BATCH_SIZE,
+  createCheckpoint,
+  signCheckpoint,
+  validateCheckpointStructure,
+} from './storage/index.js';
+export type {
+  MessageBatch,
+  BatchMessage,
+  RoomCheckpoint,
+} from './storage/index.js';
 export { X402PaymentRail } from './x402/index.js';
 export type {
   PaymentTerms,
@@ -643,3 +655,21 @@ export type {
   SyncRequest,
   SyncResponse,
 } from './protocols/index.js';
+
+// Bootstrap Phase 4: federated multi-source bootstrap
+export {
+  validateManifestStructure,
+  isManifestExpired,
+  extractPeersFromManifest,
+  savePeerCache,
+  loadPeerCache,
+  resolveBootstrap,
+  defaultBootstrapSources,
+} from './bootstrap/index.js';
+export type {
+  BootstrapSeed,
+  BootstrapManifest,
+  PeerCache,
+  BootstrapSource,
+  BootstrapResult,
+} from './bootstrap/index.js';

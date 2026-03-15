@@ -112,3 +112,17 @@ export class StorageManager {
 export { PinManager } from './pin.js';
 export { MirrorManager } from './mirror.js';
 export { ContentPropagation } from './propagation.js';
+export {
+  createBatch,
+  signBatch,
+  validateBatchStructure,
+  MAX_BATCH_SIZE,
+  type MessageBatch,
+  type BatchMessage,
+} from './message-batch.js';
+export {
+  createCheckpoint,
+  signCheckpoint,
+  validateCheckpointStructure,
+  type RoomCheckpoint,
+} from './checkpoint.js';

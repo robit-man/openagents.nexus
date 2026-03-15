@@ -51,12 +51,10 @@ const SAMPLE_ROOM: RoomManifest = {
   createdAt: 1_700_000_000_000,
   type: 'persistent',
   access: 'public',
-  retention: {
-    policy: 'community-pinned',
-    minPinners: 3,
-    archiveAfterMs: 2_592_000_000,
+  retentionDefaults: {
+    recommendedClass: 'cache',
+    defaultBatchSize: 50,
   },
-  historyRoot: null,
   memberCount: 0,
   previousVersion: null,
 };

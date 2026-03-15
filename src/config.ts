@@ -1,4 +1,5 @@
 import type { AgentRole } from './protocol/types.js';
+import type { BootstrapSource } from './bootstrap/index.js';
 
 export interface NexusConfig {
   // Identity
@@ -27,6 +28,11 @@ export interface NexusConfig {
 
   // Storage
   datastorePath?: string;
+
+  // Bootstrap (Phase 4: federated multi-source)
+  bootstrapSources?: BootstrapSource[];
+  manifestUrls?: string[];
+  cachePath?: string;
 
   // Timeouts
   connectionTimeoutMs: number;

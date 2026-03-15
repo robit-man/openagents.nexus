@@ -88,7 +88,7 @@ export interface SyncPayload {
   action: 'request' | 'response';
   since?: number;
   limit?: number;
-  historyRoot?: string; // CID
+  // historyRoot REMOVED — history is addressed via checkpoint pointers in DHT
   messageCount?: number;
   oldestTimestamp?: number;
   newestTimestamp?: number;
@@ -120,35 +120,13 @@ export interface RoomManifest {
   createdAt: number;
   type: RoomType;
   access: RoomAccess;
-  retention: {
-    policy: 'community-pinned';
-    minPinners: number;
-    archiveAfterMs: number;
+  retentionDefaults: {
+    recommendedClass: 'ephemeral' | 'cache' | 'retained';
+    defaultBatchSize: number;
   };
-  historyRoot: string | null; // CID
+  // historyRoot REMOVED — replaced by checkpoint pointers in DHT
   memberCount: number;
   previousVersion: string | null;
-}
-
-// Message page for DAG-based chat history
-export interface MessagePage {
-  schema: 'nexus:message-page:v1';
-  roomId: string;
-  pageIndex: number;
-  count: number;
-  timestamp: {
-    first: number;
-    last: number;
-  };
-  messages: StoredMessage[];
-  prev: { '/': string } | null; // IPLD link
-}
-
-export interface StoredMessage {
-  id: string;
-  timestamp: number;
-  sender: string;
-  payload: ChatPayload;
 }
 
 // Handshake protocol messages

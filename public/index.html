@@ -33,7 +33,7 @@
     --sidebar-w: 200px;
     --sidebar-r: 220px;
     --header-h: 0px;
-    --bottom-h: 80px;
+    --bottom-h: 0px;
     --panel-bg: rgba(0,0,0,0.82);
     --panel-border: rgba(255,255,255,0.07);
   }
@@ -263,33 +263,24 @@
   .log-text .log-peer { color: #aaaaaa; }
   .log-text .log-room { color: #aaaaaa; }
 
-  /* ── BOTTOM METRICS ── */
+  /* ── DIALS — bottom-right vertical stack ── */
   #bottom-bar {
     position: fixed;
-    bottom: 0; left: 0; right: 0;
-    height: var(--bottom-h);
+    bottom: 12px;
+    right: 12px;
     z-index: 50;
-    background: var(--panel-bg);
-    border-top: none;
+    background: transparent;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .dial-container {
     display: flex;
     align-items: center;
-    justify-content: center;
-    flex: 1;
-    flex-direction: column;
-    padding: 8px 0;
-    border-right: none;
-    height: 100%;
-    gap: 2px;
-    min-width: 0;
+    gap: 8px;
+    padding: 0;
   }
-  .dial-container:last-child { border-right: none; }
 
   .dial-svg-wrap {
     position: relative;
@@ -330,11 +321,12 @@
     pointer-events: none;
   }
   .dial-label {
-    font-size: 8px;
-    letter-spacing: 0.2em;
-    color: var(--grey-dim);
+    font-size: 7px;
+    letter-spacing: 0.15em;
+    color: #444;
     text-transform: uppercase;
-    text-align: center;
+    width: 32px;
+    text-align: right;
   }
 
   /* ── FOCUS RING ── */
@@ -369,15 +361,9 @@
   @media (max-width: 900px) {
     #sidebar-left { display: none; }
     #sidebar-right { display: none; }
-    #bottom-bar { height: auto; min-height: 80px; flex-wrap: wrap; }
-    .dial-container { min-width: 80px; flex: 0 0 33.3%; border-bottom: 1px solid var(--panel-border); }
-    :root { --bottom-h: 160px; }
   }
   @media (max-width: 520px) {
-    #header .install-box { display: none; }
-    #header .nav-links { display: none; }
-    .dial-container { flex: 0 0 50%; }
-    :root { --bottom-h: 168px; }
+    #bottom-bar { bottom: 6px; right: 6px; }
   }
 
   /* skip link */
@@ -455,58 +441,13 @@
 </aside>
 
 <!-- BOTTOM BAR -->
-<footer id="bottom-bar" role="contentinfo" aria-label="Network metrics" id="main-content">
-  <div class="dial-container" role="group" aria-label="Peers metric">
-    <div class="dial-svg-wrap">
-      <svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="dial-track"    cx="32" cy="32" r="26"/>
-        <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-peers-arc"/>
-      </svg>
-      <div class="dial-center-text" id="dial-peers-val">0</div>
-    </div>
-    <div class="dial-label">Peers</div>
-  </div>
-  <div class="dial-container" role="group" aria-label="Rooms metric">
-    <div class="dial-svg-wrap">
-      <svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="dial-track"    cx="32" cy="32" r="26"/>
-        <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-rooms-arc"/>
-      </svg>
-      <div class="dial-center-text" id="dial-rooms-val">0</div>
-    </div>
-    <div class="dial-label">Rooms</div>
-  </div>
-  <div class="dial-container" role="group" aria-label="Pins metric">
-    <div class="dial-svg-wrap">
-      <svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="dial-track"    cx="32" cy="32" r="26"/>
-        <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-pins-arc"/>
-      </svg>
-      <div class="dial-center-text" id="dial-pins-val">0</div>
-    </div>
-    <div class="dial-label">Pins</div>
-  </div>
-  <div class="dial-container" role="group" aria-label="Messages per second metric">
-    <div class="dial-svg-wrap">
-      <svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="dial-track"    cx="32" cy="32" r="26"/>
-        <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-msg-arc"/>
-      </svg>
-      <div class="dial-center-text" id="dial-msg-val">0</div>
-    </div>
-    <div class="dial-label">Msg/s</div>
-  </div>
-  <div class="dial-container" role="group" aria-label="Network uptime metric">
-    <div class="dial-svg-wrap">
-      <svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="dial-track"    cx="32" cy="32" r="26"/>
-        <circle class="dial-progress" cx="32" cy="32" r="26" id="dial-uptime-arc"/>
-      </svg>
-      <div class="dial-center-text" id="dial-uptime-val">0s</div>
-    </div>
-    <div class="dial-label">Uptime</div>
-  </div>
-</footer>
+<div id="bottom-bar" aria-label="Network metrics">
+  <div class="dial-container"><div class="dial-label">peers</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-peers-arc"/></svg><div class="dial-center-text" id="dial-peers-val">0</div></div></div>
+  <div class="dial-container"><div class="dial-label">rooms</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-rooms-arc"/></svg><div class="dial-center-text" id="dial-rooms-val">0</div></div></div>
+  <div class="dial-container"><div class="dial-label">pins</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-pins-arc"/></svg><div class="dial-center-text" id="dial-pins-val">0</div></div></div>
+  <div class="dial-container"><div class="dial-label">msg/s</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-msg-arc"/></svg><div class="dial-center-text" id="dial-msg-val">0</div></div></div>
+  <div class="dial-container"><div class="dial-label">up</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-uptime-arc"/></svg><div class="dial-center-text" id="dial-uptime-val">0s</div></div></div>
+</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -980,19 +921,19 @@ function renderPeerCards(bootstrapPeers) {
   });
 
   seen.forEach(({ hostname, transport, peerId }) => {
-    const shortId = peerId.slice(0, 12);
+    const label = extractShortLabel(hostname);
+    const shortId = peerId.slice(0, 8);
     const card    = document.createElement('div');
     card.className = 'peer-card';
     card.setAttribute('role', 'listitem');
     card.innerHTML = `
       <div class="peer-name">
         <div class="peer-dot"></div>
-        <div class="peer-name-text">${hostname}</div>
+        <div class="peer-name-text">${label}</div>
       </div>
       <div class="peer-meta">
-        <div class="peer-meta-item">Role: <strong>Bootstrap</strong></div>
-        <div class="peer-meta-item">Transport: <strong>${transport}</strong></div>
-        <div class="peer-meta-item" style="grid-column:1/-1">PeerId: <strong>${shortId}...</strong></div>
+        <div class="peer-meta-item">${transport}</div>
+        <div class="peer-meta-item">${shortId}...</div>
       </div>
     `;
     nodesList.appendChild(card);

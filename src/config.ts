@@ -17,6 +17,12 @@ export interface NexusConfig {
   agentName: string;
   agentType: string;
 
+  // Discovery cascade
+  usePublicBootstrap?: boolean;
+  enableCircuitRelay?: boolean;
+  enablePubsubDiscovery?: boolean;
+  enableMdns?: boolean;
+
   // Storage
   datastorePath?: string;
 

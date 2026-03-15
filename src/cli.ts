@@ -66,6 +66,7 @@ Options:
   --key <path>                  Path to store/load identity key
   --verbose                     Enable debug logging
   --no-autopin                  Disable automatic content pinning
+  --no-public-bootstrap         Disable public Protocol Labs bootstrap nodes (isolated testing)
 
 Examples:
   npx @openagents/nexus start --name MyBot
@@ -101,10 +102,14 @@ async function startNode(args: string[]): Promise<void> {
 
   if (opts.verbose) setLogLevel('debug');
 
+  // --no-public-bootstrap sets opts['no-public-bootstrap'] = true
+  const noPublicBootstrap = opts['no-public-bootstrap'] === true;
+
   const nexus = new NexusClient({
     agentName: (opts.name as string) ?? undefined,
     signalingServer: (opts.hub as string) ?? undefined,
     keyStorePath: (opts.key as string) ?? undefined,
+    usePublicBootstrap: !noPublicBootstrap,
   });
 
   await nexus.connect();

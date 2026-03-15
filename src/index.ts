@@ -13,6 +13,7 @@ import { createMetaMessage } from './chat/messages.js';
 import { DHTManager } from './dht/index.js';
 import { StorageManager } from './storage/index.js';
 import { fetchBootstrapPeers } from './signaling/onboarding.js';
+import { resolveDiscovery, buildBootstrapList } from './discovery.js';
 import { createLogger } from './logger.js';
 import { encodeMessage, roomTopic, TOPICS } from './protocol/index.js';
 import type {
@@ -52,6 +53,12 @@ export interface NexusClientOptions {
 
   // Storage
   datastorePath?: string;
+
+  // Discovery cascade (all default to true)
+  usePublicBootstrap?: boolean;    // Use Protocol Labs public bootstrap nodes
+  enableCircuitRelay?: boolean;    // Enable circuit relay for NAT traversal
+  enablePubsubDiscovery?: boolean; // Enable pubsub-based global peer discovery
+  enableMdns?: boolean;            // Enable mDNS for local-network discovery
 }
 
 export interface CreateRoomOptions {
@@ -138,24 +145,41 @@ export class NexusClient {
     });
     log.info(`Identity: ${this.identity.peerId}`);
 
-    // 2. Fetch bootstrap peers from signaling server (if no explicit peers)
-    if (this.config.bootstrapPeers.length === 0) {
-      try {
-        const bootstrap = await fetchBootstrapPeers(this.config.signalingServer);
-        if (bootstrap.peers.length > 0) {
-          this.config = resolveConfig({
-            ...this.config,
-            bootstrapPeers: bootstrap.peers,
-          });
-        }
-      } catch (err) {
-        log.warn(`Could not reach signaling server: ${err}`);
-        // Continue without bootstrap peers — mDNS will handle LAN discovery
+    // 2. Fetch bootstrap peers from signaling server (Level 1 discovery cascade)
+    let signalingPeers: string[] = [];
+    try {
+      const bootstrapResponse = await fetchBootstrapPeers(this.config.signalingServer);
+      signalingPeers = bootstrapResponse.peers;
+      if (signalingPeers.length > 0) {
+        log.info(`Signaling server provided ${signalingPeers.length} bootstrap peer(s)`);
       }
+    } catch (err) {
+      log.warn(`Could not reach signaling server: ${err}`);
+      // Continue — lower-level discovery (public bootstrap / mDNS) will handle connectivity
     }
 
+    // Build the discovery config from NexusConfig fields
+    const discovery = resolveDiscovery({
+      usePublicBootstrap: this.config.usePublicBootstrap,
+      enableCircuitRelay: this.config.enableCircuitRelay,
+      enablePubsubDiscovery: this.config.enablePubsubDiscovery,
+      enableMdns: this.config.enableMdns,
+    });
+
+    // Merge all bootstrap sources and update config so createNexusNode sees them
+    const allBootstrap = buildBootstrapList(discovery, [
+      ...signalingPeers,
+      ...this.config.bootstrapPeers,
+    ]);
+    this.config = resolveConfig({
+      ...this.config,
+      bootstrapPeers: allBootstrap,
+    });
+
     // 3. Create and start libp2p node
-    this.node = await createNexusNode(this.config, this.identity.privateKey);
+    // Pass signalingPeers separately so createNexusNode can correctly place them
+    // at the front of the bootstrap list (highest priority).
+    this.node = await createNexusNode(this.config, this.identity.privateKey, discovery, signalingPeers);
 
     // 4. Set up peer events
     this.node.addEventListener('peer:connect', (evt: any) => {

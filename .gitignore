@@ -30,3 +30,7 @@ npm-debug.log*
 # Temporary files
 tmp/
 temp/
+
+# Internal agent/AI workspace files
+.claude/
+.aiwg/

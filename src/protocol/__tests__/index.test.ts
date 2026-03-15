@@ -141,17 +141,36 @@ describe('msgIdFn', () => {
     expect(idStr).toBe(msg.id);
   });
 
-  it('returns empty Uint8Array when data is null', () => {
+  it('returns a non-empty Uint8Array when data is null (random to avoid collisions)', () => {
     const result = msgIdFn({ data: null });
     expect(result).toBeInstanceOf(Uint8Array);
-    expect(result.length).toBe(0);
+    expect(result.length).toBeGreaterThan(0);
   });
 
-  it('returns first 32 bytes as fallback for invalid JSON', () => {
+  it('returns unique IDs for successive null-data calls', () => {
+    const r1 = msgIdFn({ data: null });
+    const r2 = msgIdFn({ data: null });
+    // IDs should be random — extremely unlikely to collide
+    const s1 = Array.from(r1).join(',');
+    const s2 = Array.from(r2).join(',');
+    expect(s1).not.toBe(s2);
+  });
+
+  it('returns a non-empty Uint8Array as fallback for invalid JSON', () => {
     const garbage = new Uint8Array(64).fill(42);
     const result = msgIdFn({ data: garbage });
     expect(result).toBeInstanceOf(Uint8Array);
-    expect(result.length).toBeLessThanOrEqual(32);
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  it('returns different IDs for different garbage payloads', () => {
+    const g1 = new Uint8Array(64).fill(42);
+    const g2 = new Uint8Array(64).fill(99);
+    const r1 = msgIdFn({ data: g1 });
+    const r2 = msgIdFn({ data: g2 });
+    const s1 = Array.from(r1).join(',');
+    const s2 = Array.from(r2).join(',');
+    expect(s1).not.toBe(s2);
   });
 });
 

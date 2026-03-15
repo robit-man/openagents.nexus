@@ -19,6 +19,8 @@ import type { NexusMessage, ContentFormat } from '../protocol/index.js';
 import { createChatMessage, createPresenceMessage } from './messages.js';
 import type { AgentInfo } from './messages.js';
 import type { ContentPropagation } from '../storage/propagation.js';
+import { MAX_REFS_PER_MESSAGE } from '../storage/propagation.js';
+import { validateNexusMessage } from '../security/validators.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('chat:room');
@@ -93,12 +95,24 @@ export class NexusRoom {
       if (!detail) return;
       if (detail.topic !== this.topic) return;
       try {
-        const msg = decodeMessage(detail.data);
+        const raw = decodeMessage(detail.data);
+
+        // Validate message structure; drop malformed messages
+        const msg = validateNexusMessage(raw);
+        if (!msg) {
+          log.debug('Dropping invalid message from pubsub');
+          return;
+        }
+
+        // Clamp references to MAX_REFS_PER_MESSAGE before passing to propagation
+        const clampedRefs = msg.references
+          ? msg.references.slice(0, MAX_REFS_PER_MESSAGE)
+          : [];
 
         // Viral pinning: auto-pin any CIDs referenced in the message
-        if (this.propagation && msg.references && msg.references.length > 0) {
+        if (this.propagation && clampedRefs.length > 0) {
           this.propagation
-            .onContentReceived(msg.references, msg.sender)
+            .onContentReceived(clampedRefs, msg.sender)
             .catch((err: unknown) => {
               log.debug(`Propagation error for ${msg.id}: ${err}`);
             });

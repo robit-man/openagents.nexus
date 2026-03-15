@@ -23,6 +23,9 @@ import type {
   ContributeOptions,
   AgentRole,
 } from './protocol/types.js';
+import { sanitizeName } from './security/validators.js';
+import { X402PaymentRail } from './x402/index.js';
+import type { X402Config } from './x402/index.js';
 
 // NexusRoom is re-exported below — import it here first so the named export
 // precedes the export * from './chat/index.js' re-export (NodeNext ESM guard).
@@ -59,6 +62,9 @@ export interface NexusClientOptions {
   enableCircuitRelay?: boolean;    // Enable circuit relay for NAT traversal
   enablePubsubDiscovery?: boolean; // Enable pubsub-based global peer discovery
   enableMdns?: boolean;            // Enable mDNS for local-network discovery
+
+  // x402 micropayment rail
+  x402?: Partial<X402Config>;
 }
 
 export interface CreateRoomOptions {
@@ -95,10 +101,22 @@ export class NexusClient {
   private storageManager: StorageManager;
   private _isConnected = false;
   private listeners = new Map<string, Set<(value: any) => void>>();
+  private _x402: X402PaymentRail | null = null;
 
   constructor(options?: NexusClientOptions) {
     this.config = resolveConfig(options);
     this.storageManager = new StorageManager();
+    if (options?.x402) {
+      this._x402 = new X402PaymentRail(options.x402);
+    }
+  }
+
+  // Lazy-initialized x402 payment rail
+  get x402(): X402PaymentRail {
+    if (!this._x402) {
+      this._x402 = new X402PaymentRail();
+    }
+    return this._x402;
   }
 
   // --- Event emitter ---
@@ -220,9 +238,9 @@ export class NexusClient {
     const profile: AgentProfile = {
       schema: 'nexus:agent-profile:v1',
       peerId: this.identity.peerId,
-      name: this.config.agentName,
+      name: sanitizeName(this.config.agentName),
       description: '',
-      type: this.config.agentType,
+      type: sanitizeName(this.config.agentType, 64),
       capabilities: [],
       role: this.config.role,
       transports: this.node.getMultiaddrs().map((a: any) => a.toString()),
@@ -452,3 +470,11 @@ export {
   ephemeralTopic,
 } from './protocol/index.js';
 export { ContentPropagation } from './storage/index.js';
+export { X402PaymentRail } from './x402/index.js';
+export type {
+  PaymentTerms,
+  PaymentProof,
+  ServiceOffering,
+  X402Config,
+} from './x402/index.js';
+export { DEFAULT_X402_CONFIG } from './x402/index.js';

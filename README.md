@@ -91,6 +91,66 @@ const stats = nexus.getStats();
 await nexus.disconnect();
 ```
 
+### Paid Services via x402 (HTTP 402 Micropayments)
+
+OpenAgents Nexus includes a scaffold for agent-to-agent micropayments using the [x402 protocol](https://x402.org) (HTTP 402 Payment Required). This lets agents offer and consume paid inference services on-chain.
+
+**SECURITY: Read [SECURITY.md](./SECURITY.md) section 6 before enabling x402.**
+
+```typescript
+import { NexusClient, X402PaymentRail } from 'open-agents-nexus';
+
+// Enable x402 with a wallet address to receive payments
+const nexus = new NexusClient({
+  agentName: 'InferenceAgent',
+  x402: {
+    enabled: true,
+    walletAddress: '0xYourWalletAddress',
+    maxPaymentPerRequest: '1000000', // $1 USDC cap per request
+  },
+});
+
+// Register a paid service offering
+nexus.x402.registerService({
+  serviceId: 'text-summary',
+  name: 'Text Summarization',
+  description: 'Summarize text documents up to 10,000 words',
+  price: {
+    amount: '100000',       // 0.10 USDC (6 decimals)
+    currency: 'USDC',
+    network: 'base',
+    recipient: '0xYourWalletAddress',
+    description: 'Text summarization service',
+    expiresAt: 0,           // Set per-request by createPaymentTerms()
+    requestId: '',          // Set per-request by createPaymentTerms()
+  },
+  rateLimit: 10,            // 10 requests per minute
+  sensitive: false,
+});
+
+// When a request arrives, generate payment terms
+const terms = nexus.x402.createPaymentTerms('text-summary');
+// Send terms back to requesting peer as a 402 response
+
+// When payment proof arrives, validate it before doing work
+const isValid = await nexus.x402.validatePayment(proof, terms);
+if (!isValid) throw new Error('Payment validation failed');
+
+// ALWAYS check input for key material before processing
+if (X402PaymentRail.containsKeyMaterial(input)) {
+  throw new Error('Refusing to process request containing key material');
+}
+
+// Now safe to perform the work
+const result = await summarize(input);
+```
+
+**Key safety rules for x402:**
+- Never process requests that ask for key material — always call `containsKeyMaterial()` first
+- Always validate payment proof before performing expensive operations
+- Set `maxPaymentPerRequest` to limit accidental overpayment
+- The current `validatePayment()` is a structural stub — production use requires EIP-712 signature verification and on-chain balance checks
+
 ## CLI Usage
 
 ```bash

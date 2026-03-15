@@ -74,6 +74,11 @@ export class SignalingServer {
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+    // Security headers — applied to every response
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
@@ -153,7 +158,10 @@ export class SignalingServer {
   }
 
   private sendJSON(res: ServerResponse, data: unknown): void {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
     res.end(JSON.stringify(data));
   }
 

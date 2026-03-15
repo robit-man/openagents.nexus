@@ -11,6 +11,9 @@ import { NexusClient } from './index.js';
 import { SignalingServer } from './signaling/server.js';
 import { setLogLevel } from './logger.js';
 import { createInterface } from 'node:readline';
+import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const VERSION = '0.1.0';
 
@@ -126,9 +129,22 @@ async function startNode(args: string[]): Promise<void> {
   await new Promise<never>(() => {});
 }
 
+function defaultHubKeyPath(): string {
+  const dir = join(homedir(), '.config', 'openagents-nexus');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return join(dir, 'hub-key');
+}
+
 async function startHub(args: string[]): Promise<void> {
   const opts = parseArgs(args);
-  const port = parseInt((opts.port as string) ?? '9090');
+  const rawPort = opts.port as string | undefined;
+  const parsedPort = rawPort !== undefined ? parseInt(rawPort, 10) : NaN;
+  const port = rawPort === undefined ? 9090 : (Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort < 65536 ? parsedPort : NaN);
+
+  if (isNaN(port)) {
+    console.error(`Error: --port must be a valid port number (1-65535), got: ${rawPort}`);
+    process.exit(1);
+  }
 
   if (opts.verbose) setLogLevel('debug');
 
@@ -142,7 +158,7 @@ async function startHub(args: string[]): Promise<void> {
     agentType: 'infrastructure',
     role: 'storage',
     signalingServer: `http://localhost:${port}`,
-    keyStorePath: (opts.key as string) ?? '.nexus-hub-key',
+    keyStorePath: (opts.key as string) ?? defaultHubKeyPath(),
   });
 
   await nexus.connect();

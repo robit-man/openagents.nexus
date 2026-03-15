@@ -8,6 +8,7 @@
 
 import { createLogger } from '../logger.js';
 import type { AgentProfile, RoomManifest } from '../protocol/types.js';
+import { validateAgentProfile, validateRoomManifest } from '../security/validators.js';
 
 const log = createLogger('dht:registry');
 
@@ -52,7 +53,12 @@ export class DHTRegistry {
       for await (const event of this.dht.get(key)) {
         if (event.name === 'VALUE') {
           const data = new TextDecoder().decode(event.value);
-          return JSON.parse(data) as AgentProfile;
+          const parsed = validateAgentProfile(JSON.parse(data));
+          if (!parsed) {
+            log.warn(`Invalid agent profile schema for ${peerId}`);
+            return null;
+          }
+          return parsed;
         }
       }
     } catch (err) {
@@ -85,7 +91,12 @@ export class DHTRegistry {
       for await (const event of this.dht.get(key)) {
         if (event.name === 'VALUE') {
           const data = new TextDecoder().decode(event.value);
-          return JSON.parse(data) as RoomManifest;
+          const parsed = validateRoomManifest(JSON.parse(data));
+          if (!parsed) {
+            log.warn(`Invalid room manifest schema for ${roomId}`);
+            return null;
+          }
+          return parsed;
         }
       }
     } catch (err) {

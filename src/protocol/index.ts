@@ -64,15 +64,39 @@ export function decodeMessage(data: Uint8Array): NexusMessage {
   return JSON.parse(new TextDecoder().decode(data));
 }
 
+// Simple non-cryptographic hash of a Uint8Array — djb2 variant over all bytes.
+// Returns a 32-byte hex string encoded as UTF-8 bytes.
+function hashBytes(data: Uint8Array): Uint8Array {
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0xdeadbeef >>> 0;
+  for (let i = 0; i < data.length; i++) {
+    h1 = Math.imul(h1 ^ data[i], 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ data[i], 0x811c9dc5) >>> 0;
+  }
+  // Mix in index to make h1 and h2 diverge
+  h1 ^= h2;
+  h2 ^= h1;
+  const hex = (h1 >>> 0).toString(16).padStart(8, '0')
+    + (h2 >>> 0).toString(16).padStart(8, '0')
+    + data.length.toString(16).padStart(8, '0')
+    + (h1 ^ data.length >>> 0).toString(16).padStart(8, '0');
+  return new TextEncoder().encode(hex);
+}
+
 // Message ID function for GossipSub deduplication
 export function msgIdFn(msg: { data: Uint8Array | null }): Uint8Array {
-  if (!msg.data) return new Uint8Array(0);
+  // For null data return a random 32-byte ID to avoid collisions between null-data messages
+  if (!msg.data) {
+    const rand = new Uint8Array(16);
+    crypto.getRandomValues(rand);
+    return rand;
+  }
   try {
     const envelope = JSON.parse(new TextDecoder().decode(msg.data));
     return new TextEncoder().encode(envelope.id);
   } catch {
-    // fallback: use raw data hash (we'll just use the first 32 bytes as a simple fingerprint)
-    return msg.data.subarray(0, 32);
+    // fallback: hash the full data so different payloads get different IDs
+    return hashBytes(msg.data);
   }
 }
 

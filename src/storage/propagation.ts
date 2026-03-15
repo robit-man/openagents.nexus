@@ -8,8 +8,16 @@
  */
 
 import { createLogger } from '../logger.js';
+import { isValidCid } from '../security/validators.js';
 
 const log = createLogger('storage:propagation');
+
+// Security bounds — prevent unbounded memory growth and viral amplification attacks
+export const MAX_REFS_PER_MESSAGE = 8;
+export const MAX_PINNED_CIDS = 10_000;
+export const MAX_TRACKED_CIDS = 50_000;
+/** Max pin-trigger events per sender per minute */
+const MAX_PIN_TRIGGERS_PER_MINUTE = 10;
 
 export interface PropagationStats {
   totalPinned: number;
@@ -23,6 +31,9 @@ export class ContentPropagation {
   private cidSources = new Map<string, Set<string>>(); // CID -> set of peerIds that have it
   private autopinEnabled = true;
   private pinCallback: ((cid: string) => Promise<void>) | null = null;
+
+  // Per-sender rate limiting: tracks pin-trigger counts in the current minute window
+  private senderPinCounts = new Map<string, { count: number; windowStart: number }>();
 
   constructor() {}
 
@@ -40,28 +51,49 @@ export class ContentPropagation {
   // Called when we receive a message that references CIDs.
   // This is the viral mechanism: seeing content = pinning content.
   async onContentReceived(cids: string[], sourcePeerId: string): Promise<void> {
+    // Clamp the number of references to guard against amplification
+    const clampedCids = cids.slice(0, MAX_REFS_PER_MESSAGE);
+
+    // Validate each CID format; skip invalid ones
+    const validCids = clampedCids.filter(cid => {
+      if (!isValidCid(cid)) {
+        log.warn(`Skipping invalid CID from ${sourcePeerId.slice(0, 12)}...: ${cid}`);
+        return false;
+      }
+      return true;
+    });
+
     if (!this.autopinEnabled || !this.pinCallback) {
       // Even when disabled, track sources so we know what is popular
-      if (cids.length > 0) {
-        for (const cid of cids) {
-          if (!this.cidSources.has(cid)) {
-            this.cidSources.set(cid, new Set());
-          }
-          this.cidSources.get(cid)!.add(sourcePeerId);
+      if (validCids.length > 0) {
+        for (const cid of validCids) {
+          this._trackSource(cid, sourcePeerId);
         }
       }
       return;
     }
 
-    for (const cid of cids) {
-      // Track who has this content
-      if (!this.cidSources.has(cid)) {
-        this.cidSources.set(cid, new Set());
-      }
-      this.cidSources.get(cid)!.add(sourcePeerId);
+    // Per-sender rate limit: max MAX_PIN_TRIGGERS_PER_MINUTE triggers per minute
+    if (!this._checkSenderRateLimit(sourcePeerId)) {
+      log.warn(`Rate limiting pin triggers from ${sourcePeerId.slice(0, 12)}...`);
+      return;
+    }
 
-      // Auto-pin if we haven't already
+    for (const cid of validCids) {
+      // Track who has this content
+      this._trackSource(cid, sourcePeerId);
+
+      // Auto-pin if we haven't already and within bounds
       if (!this.localPins.has(cid)) {
+        if (this.localPins.size >= MAX_PINNED_CIDS) {
+          // LRU eviction: remove the first (oldest) entry
+          const oldest = this.localPins.values().next().value;
+          if (oldest !== undefined) {
+            this.localPins.delete(oldest);
+            log.debug(`LRU evicted pin: ${oldest}`);
+          }
+        }
+
         try {
           await this.pinCallback(cid);
           this.localPins.add(cid);
@@ -103,5 +135,35 @@ export class ContentPropagation {
   // Get all locally pinned CIDs
   getLocalPins(): string[] {
     return Array.from(this.localPins);
+  }
+
+  // ---- Private helpers ----
+
+  private _trackSource(cid: string, sourcePeerId: string): void {
+    if (this.cidSources.size >= MAX_TRACKED_CIDS && !this.cidSources.has(cid)) {
+      // Cap the tracked CIDs map to avoid unbounded memory growth
+      log.warn(`MAX_TRACKED_CIDS (${MAX_TRACKED_CIDS}) reached; dropping source tracking for ${cid}`);
+      return;
+    }
+
+    if (!this.cidSources.has(cid)) {
+      this.cidSources.set(cid, new Set());
+    }
+    this.cidSources.get(cid)!.add(sourcePeerId);
+  }
+
+  private _checkSenderRateLimit(peerId: string): boolean {
+    const now = Date.now();
+    const windowMs = 60_000; // 1 minute
+
+    let entry = this.senderPinCounts.get(peerId);
+    if (!entry || now - entry.windowStart >= windowMs) {
+      // Start a new window
+      entry = { count: 0, windowStart: now };
+      this.senderPinCounts.set(peerId, entry);
+    }
+
+    entry.count++;
+    return entry.count <= MAX_PIN_TRIGGERS_PER_MINUTE;
   }
 }

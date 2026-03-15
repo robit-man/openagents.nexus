@@ -338,6 +338,8 @@ export class NexusClient {
       savePeerCache(cachePath, [...bootstrapResult.peers, ...connectedAddrs]);
     }
 
+    // Register in the hub's persistent directory (one-time, not recurring)
+    this.registerInDirectory().catch(() => {});
   }
 
   async disconnect(): Promise<void> {
@@ -405,6 +407,27 @@ export class NexusClient {
         signal: AbortSignal.timeout(3_000),
       });
     } catch { /* silent — metrics reporting is best-effort */ }
+  }
+
+  // Register this agent in the hub's persistent directory (KV-backed, low frequency)
+  // Called once on connect — not recurring. The directory is a fallback for agents
+  // that can't reach NATS or public bootstrap.
+  async registerInDirectory(): Promise<void> {
+    const hubUrl = this.config.signalingServer;
+    try {
+      await fetch(`${hubUrl}/api/v1/directory`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          peerId: this.identity!.peerId,
+          agentName: this.config.agentName,
+          multiaddrs: this.node ? this.node.getMultiaddrs().map((a: any) => a.toString()) : [],
+          rooms: this.roomManager?.getJoinedRooms() ?? [],
+          nknAddress: this.nknFallback?.address ?? undefined,
+        }),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch { /* silent — directory registration is best-effort */ }
   }
 
   // --- Rooms ---

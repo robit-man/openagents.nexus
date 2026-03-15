@@ -1,14 +1,16 @@
 /**
  * Cloudflare Worker — openagents.nexus API
  *
- * Static assets served by [assets] in wrangler.toml.
+ * HTML served directly from Worker (not assets) to prevent
+ * Cloudflare edge script injection (SES lockdown / beacon).
  * API routes handle bootstrap, network state, and agent reporting.
- * Live agent data stored in KV with 60s TTL (auto-expires stale agents).
+ * Live agent data stored in KV with 60s TTL.
  */
+
+import { INDEX_HTML } from './html.js';
 
 interface Env {
   AGENTS: KVNamespace;
-  ASSETS: { fetch: typeof fetch };
 }
 
 const PUBLIC_BOOTSTRAP = [
@@ -183,30 +185,16 @@ export default {
         return json({ ok: true, peerId: record.peerId, ttl: AGENT_TTL });
       }
 
-      default: {
-        // Serve static assets — strip any Cloudflare-injected scripts
-        const assetResponse = await env.ASSETS.fetch(request);
-        const contentType = assetResponse.headers.get('content-type') || '';
-
-        if (contentType.includes('text/html')) {
-          let html = await assetResponse.text();
-          // Remove Cloudflare injected SES lockdown and beacon scripts
-          html = html.replace(/<script[^>]*cloudflareinsights[^>]*>[\s\S]*?<\/script>/gi, '');
-          html = html.replace(/<script[^>]*lockdown[^>]*>[\s\S]*?<\/script>/gi, '');
-          html = html.replace(/<script[^>]*cdn-cgi[^>]*>[\s\S]*?<\/script>/gi, '');
-          html = html.replace(/<script[^>]*beacon\.min\.js[^>]*>[\s\S]*?<\/script>/gi, '');
-
-          return new Response(html, {
-            status: assetResponse.status,
-            headers: {
-              'Content-Type': 'text/html; charset=utf-8',
-              'X-Content-Type-Options': 'nosniff',
-            },
-          });
-        }
-
-        return assetResponse;
-      }
+      default:
+        // Serve embedded HTML directly — bypasses Cloudflare edge injection
+        return new Response(INDEX_HTML, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'public, max-age=60',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
     }
   },
 };

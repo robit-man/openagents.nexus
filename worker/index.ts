@@ -183,9 +183,15 @@ export default {
         return json({ ok: true, peerId: record.peerId, ttl: AGENT_TTL });
       }
 
-      default:
-        // Serve static assets for non-API routes
-        return env.ASSETS.fetch(request);
+      default: {
+        // Serve static assets — add headers to prevent Cloudflare script injection
+        const assetResponse = await env.ASSETS.fetch(request);
+        const response = new Response(assetResponse.body, assetResponse);
+        // Tell Cloudflare edge NOT to modify this response
+        response.headers.set('cf-edge-cache', 'no-store');
+        response.headers.set('server-timing', 'cf-no-transform');
+        return response;
+      }
     }
   },
 };

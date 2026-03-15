@@ -193,6 +193,7 @@ export default {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'public, max-age=60',
             'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; object-src 'none'",
           },
         });
     }

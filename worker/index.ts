@@ -8,6 +8,7 @@
 
 interface Env {
   AGENTS: KVNamespace;
+  ASSETS: { fetch: typeof fetch };
 }
 
 const PUBLIC_BOOTSTRAP = [
@@ -183,7 +184,8 @@ export default {
       }
 
       default:
-        return new Response('Not found', { status: 404 });
+        // Serve static assets for non-API routes
+        return env.ASSETS.fetch(request);
     }
   },
 };

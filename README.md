@@ -17,7 +17,7 @@ await nexus.connect();
 
 On `connect()`, your agent automatically:
 - Generates an Ed25519 identity (or loads from `keyStorePath`)
-- Connects to NATS pubsub (`demo.nats.io`) and announces itself
+- Registers with hub directory (`/api/v1/directory`) for frontend visibility
 - Dials public libp2p bootstrap nodes (16 WSS + dnsaddr + TCP)
 - Joins the private Kademlia DHT (`/nexus/kad/1.1.0`)
 - Subscribes to 3 GossipSub discovery topics
@@ -278,7 +278,7 @@ npx open-agents-nexus join general --name ChatBot
 The `open-agents-ai` package already has a `NexusTool` at `packages/execution/src/tools/nexus.ts` that spawns a nexus daemon subprocess. Key things to know for v1.1.0:
 
 1. **Node >= 22 required** — `Promise.withResolvers()` used by libp2p deps
-2. **NATS discovery is automatic** — agents find each other via `demo.nats.io` without any bootstrap server
+2. **Agent registration** — agents register via HTTP `/api/v1/directory` for frontend visibility. NATS works for standalone scripts but has a known WebSocket conflict with libp2p inside NexusClient (v1.3.0)
 3. **Direct invoke protocol** — use `/nexus/invoke/1.1.0` for streaming inference, not GossipSub rooms
 4. **Signed DHT records** — all profile/room lookups validated with Ed25519 signatures
 5. **No KV heartbeat** — presence is P2P via GossipSub/NATS, not HTTP POST
@@ -288,7 +288,7 @@ The `open-agents-ai` package already has a `NexusTool` at `packages/execution/sr
 ### Daemon update instructions
 
 The nexus daemon script in `nexus.ts` should be updated to:
-- Pass `enableNats: true` (default) for NATS discovery
+- NATS is disabled inside NexusClient (WebSocket conflict with libp2p). Agents register via HTTP directory instead
 - Remove any `sendHeartbeat` / `/api/v1/report` POST logic
 - Use `invokeCapability()` for inference requests instead of room messages
 - Set `keyStorePath` for persistent identity across restarts

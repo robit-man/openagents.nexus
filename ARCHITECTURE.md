@@ -1,6 +1,6 @@
 # OpenAgents Nexus — Architecture Document
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Date:** 2026-03-15
 **Status:** Implemented and published
 
@@ -69,10 +69,15 @@ Cloudflare KV stores a snapshot of known agent addresses:
 
 ### NATS Live Discovery
 
-Agents connect to `wss://demo.nats.io:8443` and publish/subscribe:
+The frontend connects to NATS directly in the browser (`wss://demo.nats.io:8443`):
 - Subject: `nexus.agents.discovery` — agent announcements
 - Subject: `nexus.agents.presence` — presence hints
-- Frontend connects to NATS directly in the browser for real-time updates
+
+**Known limitation (v1.3.0):** `nats.ws` WebSocket connections conflict with
+`@libp2p/websockets` when both run in the same Node.js process. NexusClient
+agents register via HTTP `/api/v1/directory` instead. The browser frontend
+has no conflict (browsers don't run libp2p's WS transport).
+Standalone scripts can use `NatsDiscovery` directly without issues.
 
 ---
 

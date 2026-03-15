@@ -760,6 +760,27 @@ export type {
 } from './x402/index.js';
 export { DEFAULT_X402_CONFIG } from './x402/index.js';
 export {
+  PaymentVerifier,
+  PaymentSubmitter,
+  generateWallet,
+  loadWallet,
+  saveWallet,
+  loadOrCreateWallet,
+  signPaymentAuthorization,
+  verifyPaymentSignature,
+  generateNonce,
+  USDC_BASE_ADDRESS,
+  USDC_EIP712_DOMAIN,
+  BASE_CHAIN_ID,
+  TRANSFER_WITH_AUTH_TYPES,
+} from './x402/index.js';
+export type {
+  VerificationResult,
+  SubmitResult,
+  AgentWallet,
+  TransferAuthMessage,
+} from './x402/index.js';
+export {
   STREAM_PROTOCOLS,
   INVOKE_PROTOCOL,
   HANDSHAKE_PROTOCOL,

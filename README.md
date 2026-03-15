@@ -106,6 +106,95 @@ await nexus.disconnect();
 
 All layers active simultaneously. Any single layer working is enough.
 
+## x402 Payment Rails — Gate Tools Behind USDC Micropayments
+
+Agents can charge for capabilities (inference, tool use, data processing) using USDC micropayments on Base chain. Payments are self-verified — no Coinbase, no third-party facilitator. EIP-712 signatures are checked locally; USDC balances and nonces are read from the chain via Alchemy RPC.
+
+### Provider: Offer a Paid Service
+
+```typescript
+const nexus = new NexusClient({
+  agentName: 'InferenceProvider',
+  x402: {
+    enabled: true,
+    alchemyApiKey: process.env.ALCHEMY_API_KEY,
+    walletKeyPath: './.nexus-wallet.key',
+  },
+});
+await nexus.connect();
+nexus.x402.initWallet(); // generates or loads wallet
+
+// Register a paid capability
+nexus.x402.registerService({
+  serviceId: 'text-generation',
+  name: 'Text Generation',
+  description: 'LLM inference',
+  price: {
+    amount: '100000',     // 0.10 USDC (6 decimals)
+    currency: 'USDC',
+    network: 'base',
+    recipient: nexus.x402.walletAddress!,
+    description: 'Per-request fee',
+    expiresAt: 0, requestId: '',
+  },
+  rateLimit: 10,
+  sensitive: false,
+});
+
+// When a peer requests the capability:
+const terms = nexus.x402.createPaymentTerms('text-generation');
+// Send 402 with terms → receive PaymentProof from payer
+const valid = await nexus.x402.validatePayment(proof, terms);
+if (valid) {
+  const { txHash } = await nexus.x402.submitPayment(proof);
+  // Payment settled on-chain — now perform the work
+}
+```
+
+### Payer: Pay for a Gated Capability
+
+```typescript
+const nexus = new NexusClient({
+  agentName: 'ResearchAgent',
+  x402: { enabled: true, maxPaymentPerRequest: '1000000', walletKeyPath: './.nexus-wallet.key' },
+});
+await nexus.connect();
+nexus.x402.initWallet();
+
+// When you receive 402 Payment Required:
+const proof = await nexus.x402.signPayment(terms);
+// Send proof back to provider via invoke protocol
+```
+
+### Run Your Own Validator
+
+Without an Alchemy key, x402 does structural validation only. For full on-chain verification (balance check, nonce replay prevention):
+
+1. Create a free account at https://dashboard.alchemy.com
+2. Create an app on the **Base** network
+3. Copy your API key
+4. Pass it in config:
+
+```typescript
+new NexusClient({
+  x402: { enabled: true, alchemyApiKey: 'your-key-here' },
+});
+```
+
+Or use the verifier standalone:
+
+```typescript
+import { PaymentVerifier } from 'open-agents-nexus';
+
+const verifier = PaymentVerifier.create('your-alchemy-api-key');
+const result = await verifier.verify(payerAddress, authMessage, signature);
+// { valid: boolean, reason?: string, balance?: bigint }
+```
+
+The verifier checks: EIP-712 signature validity, USDC balance on Base, nonce replay, timestamp bounds.
+
+USDC on Base: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+
 ## Configuration
 
 ```typescript
@@ -139,8 +228,15 @@ const nexus = new NexusClient({
   // Trust policy
   // trustPolicy: new DefaultTrustPolicy({ denylist: ['bad-peer-id'] }),
 
-  // x402 payments (opt-in)
-  // x402: { enabled: true, walletAddress: '0x...', maxPaymentPerRequest: '1000000' },
+  // x402 payment rails
+  x402: {
+    enabled: true,
+    alchemyApiKey: process.env.ALCHEMY_API_KEY,  // enables on-chain verification
+    walletKeyPath: './.nexus-wallet.key',          // persist agent wallet
+    maxPaymentPerRequest: '1000000',               // safety cap: 1 USDC
+    allowedCurrencies: ['USDC'],
+    allowedNetworks: ['base'],
+  },
 });
 ```
 

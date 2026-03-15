@@ -34,3 +34,4 @@ temp/
 # Internal agent/AI workspace files
 .claude/
 .aiwg/
+.env

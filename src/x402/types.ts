@@ -37,6 +37,15 @@ export interface PaymentProof {
     payer: string;
     timestamp: number;
   };
+  // EIP-3009 authorization details (present when using real on-chain verification)
+  authorization?: {
+    from: string;
+    to: string;
+    value: string;
+    validAfter: string;
+    validBefore: string;
+    nonce: string;
+  };
 }
 
 // Service offering advertised by an agent
@@ -67,6 +76,10 @@ export interface X402Config {
   allowedCurrencies: string[];
   // Allowed networks
   allowedNetworks: string[];
+  // Alchemy API key for on-chain verification (optional — falls back to structural validation)
+  alchemyApiKey?: string;
+  // Path to agent wallet key file (optional)
+  walletKeyPath?: string;
 }
 
 export const DEFAULT_X402_CONFIG: X402Config = {

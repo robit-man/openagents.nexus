@@ -216,28 +216,33 @@ export default {
         };
 
         // Write to KV — this is the only write, max once per 60s
-        await env.AGENTS.put('known-agents', JSON.stringify(directory));
+        try {
+          await env.AGENTS.put('known-agents', JSON.stringify(directory));
 
-        // Also snapshot network state
-        await env.AGENTS.put('network-snapshot', JSON.stringify({
-          peerCount: capped.length,
-          roomCount: new Set(capped.flatMap((a: any) => a.rooms || [])).size || 1,
-          rooms: Array.from(new Set(capped.flatMap((a: any) => a.rooms || ['general']))).map(r => ({
-            roomId: r, name: r, topic: `/nexus/room/${r}`,
-            memberCount: capped.filter((a: any) => (a.rooms || []).includes(r)).length,
-            type: 'persistent', access: 'public', manifest: '',
-          })),
-          knownAgents: capped.map((a: any) => ({
-            peerId: a.peerId,
-            agentName: a.agentName,
-            rooms: a.rooms,
-            nknAddress: a.nknAddress,
-          })),
-          updatedAt: now,
-        }));
+          // Also snapshot network state
+          await env.AGENTS.put('network-snapshot', JSON.stringify({
+            peerCount: capped.length,
+            roomCount: new Set(capped.flatMap((a: any) => a.rooms || [])).size || 1,
+            rooms: Array.from(new Set(capped.flatMap((a: any) => a.rooms || ['general']))).map(r => ({
+              roomId: r, name: r, topic: `/nexus/room/${r}`,
+              memberCount: capped.filter((a: any) => (a.rooms || []).includes(r)).length,
+              type: 'persistent', access: 'public', manifest: '',
+            })),
+            knownAgents: capped.map((a: any) => ({
+              peerId: a.peerId,
+              agentName: a.agentName,
+              rooms: a.rooms,
+              nknAddress: a.nknAddress,
+            })),
+            updatedAt: now,
+          }));
 
-        lastDirectoryWrite = now;
-        return json({ ok: true, persisted: true, agentsInDirectory: capped.length });
+          lastDirectoryWrite = now;
+          return json({ ok: true, persisted: true, agentsInDirectory: capped.length });
+        } catch (kvErr) {
+          // KV write failed — return success with persisted: false so agent knows
+          return json({ ok: true, persisted: false, reason: 'kv-write-error', error: String(kvErr) });
+        }
       }
 
       // ── Agent instructions — machine-readable onboarding for LLMs/agents ──

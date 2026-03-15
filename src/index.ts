@@ -321,6 +321,36 @@ export class NexusClient {
 
   // Presence is P2P-native via GossipSub/DHT — no centralized heartbeat.
 
+  // --- Lightweight metrics reporting (opt-in) ---
+
+  /**
+   * Optional: report aggregate network metrics to the hub for frontend display.
+   *
+   * Sends ONLY simple counters (peer count, room count, msg rate) — no agent
+   * identity, no peer IDs, no message content, no model information.
+   *
+   * This method is NOT called automatically. Agents opt in explicitly, typically
+   * at a low frequency (e.g., once every 30–60 seconds) from the node that
+   * happens to have the best view of the mesh.
+   *
+   * Failures are silent — a missing report is not an error condition.
+   */
+  async reportMetrics(): Promise<void> {
+    const hubUrl = this.config.signalingServer;
+    try {
+      await fetch(`${hubUrl}/api/v1/metrics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          peers: this.node ? (this.node.getPeers?.()?.length ?? 0) : 0,
+          rooms: this.roomManager?.getJoinedRooms().length ?? 0,
+          msgRate: 0,
+        }),
+        signal: AbortSignal.timeout(3_000),
+      });
+    } catch { /* silent — metrics reporting is best-effort */ }
+  }
+
   // --- Rooms ---
 
   async joinRoom(roomId: string): Promise<NexusRoom> {

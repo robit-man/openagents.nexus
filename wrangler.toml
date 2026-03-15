@@ -2,6 +2,4 @@ name = "openagentsnexus"
 main = "worker/index.ts"
 compatibility_date = "2026-03-15"
 
-[[kv_namespaces]]
-binding = "AGENTS"
-id = "be508dc2d8f94722a6f9d7377f0bfc8a"
+# No KV binding — metrics are in-memory only

@@ -3,15 +3,17 @@
  *
  * HTML served directly from Worker (not assets) to prevent
  * Cloudflare edge script injection (SES lockdown / beacon).
- * API routes handle bootstrap, network state, and agent reporting.
- * Live agent data stored in KV with 60s TTL.
+ * API routes handle bootstrap and network state.
+ *
+ * Phase 8: All metrics are in-memory only — no KV, no PII, no agent identity.
+ * Nodes POST lightweight aggregate counters (peer count, room count, msg rate)
+ * via /api/v1/metrics. Counters reset on Worker restart — that is acceptable.
  */
 
 import { INDEX_HTML } from './html.js';
 
-interface Env {
-  AGENTS: KVNamespace;
-}
+// No Env bindings — KV removed in Phase 8
+interface Env {}
 
 const PUBLIC_BOOTSTRAP = [
   '/dns4/am6.bootstrap.libp2p.io/tcp/443/wss/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
@@ -53,23 +55,18 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-// KV key prefix for agent records
-const AGENT_PREFIX = 'agent:';
-const AGENT_TTL = 60; // seconds — agents must heartbeat within this window
-
-// Get all live agents from KV
-async function getLiveAgents(kv: KVNamespace): Promise<any[]> {
-  const list = await kv.list({ prefix: AGENT_PREFIX });
-  const agents: any[] = [];
-  for (const key of list.keys) {
-    const val = await kv.get(key.name, 'json');
-    if (val) agents.push(val);
-  }
-  return agents;
-}
+// ── In-memory aggregate metrics — NOT persisted, resets on Worker restart ──
+// Nodes POST simple counters here. No PII, no identity, no message content.
+let metrics = {
+  totalPeers: 0,
+  totalRooms: 0,
+  messageRate: 0,
+  lastReport: 0,
+  reportCount: 0,
+};
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, _env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
@@ -86,103 +83,44 @@ export default {
           discoveryTopics: DISCOVERY_TOPICS,
         });
 
-      // ── Live network state (reads from KV) ──
+      // ── Live network state (reads from in-memory metrics) ──
       case '/api/v1/network': {
-        const agents = await getLiveAgents(env.AGENTS);
-        const rooms = new Set<string>();
-        agents.forEach(a => (a.rooms || []).forEach((r: string) => rooms.add(r)));
-        if (rooms.size === 0) rooms.add('general');
-
         return json({
-          peerCount: agents.length,
-          roomCount: rooms.size,
-          messageRate: 0,
-          storageProviders: agents.filter((a: any) => a.role === 'storage').length,
+          peerCount: metrics.totalPeers,
+          roomCount: metrics.totalRooms || 1,
+          messageRate: metrics.messageRate,
+          storageProviders: 0,
           protocolVersion: 1,
-          uptime: 0,
-          rooms: Array.from(rooms).map(r => ({
-            roomId: r, name: r, topic: `/nexus/room/${r}`,
-            memberCount: agents.filter((a: any) => (a.rooms || []).includes(r)).length,
-            type: 'persistent', access: 'public', manifest: '',
-          })),
-          agents: agents.map(a => ({
-            peerId: a.peerId,
-            agentName: a.agentName || 'anonymous',
-            rooms: a.rooms || [],
-            capabilities: a.capabilities || [],
-            model: a.model || null,
-            system: a.system || null,
-            role: a.role || 'full',
-            version: a.version || 'unknown',
-            lastSeen: a.lastSeen || 0,
-          })),
+          uptime: metrics.lastReport > 0 ? Math.floor((Date.now() - metrics.lastReport) / 1000) : 0,
+          rooms: [{ roomId: 'general', name: 'general', topic: '/nexus/room/general', memberCount: metrics.totalPeers, type: 'persistent', access: 'public', manifest: '' }],
+          // NO agents array — individual agent data is P2P only
         });
       }
 
-      // ── Room list ──
+      // ── Room list (static — no KV) ──
       case '/api/v1/rooms': {
-        const agents = await getLiveAgents(env.AGENTS);
-        const rooms = new Set<string>(['general']);
-        agents.forEach(a => (a.rooms || []).forEach((r: string) => rooms.add(r)));
-
         return json({
-          rooms: Array.from(rooms).map(r => ({
-            roomId: r, name: r, topic: `/nexus/room/${r}`,
-            memberCount: agents.filter((a: any) => (a.rooms || []).includes(r)).length,
-            type: 'persistent', access: 'public', manifest: '',
-          })),
+          rooms: [{ roomId: 'general', name: 'general', topic: '/nexus/room/general', memberCount: metrics.totalPeers, type: 'persistent', access: 'public', manifest: '' }],
         });
       }
 
-      // ── Agent heartbeat/report (POST) ──
-      case '/api/v1/report': {
-        if (request.method !== 'POST') {
-          return json({ error: 'POST required' }, 405);
-        }
+      // ── Lightweight aggregate metrics report from any node ──
+      // Accepts: { peers: number, rooms: number, msgRate: number }
+      // Does NOT accept: agent names, peer IDs, message content, model info
+      case '/api/v1/metrics': {
+        if (request.method !== 'POST') return json({ error: 'POST required' }, 405);
 
         let body: any;
-        try {
-          body = await request.json();
-        } catch {
-          return json({ error: 'Invalid JSON' }, 400);
-        }
+        try { body = await request.json(); } catch { return json({ error: 'Invalid JSON' }, 400); }
 
-        // Validate required field
-        if (!body.peerId || typeof body.peerId !== 'string' || body.peerId.length < 10) {
-          return json({ error: 'Missing or invalid peerId' }, 400);
-        }
+        // Accept only simple counters — no PII, no identity
+        metrics.totalPeers = Math.max(0, Number(body.peers) || 0);
+        metrics.totalRooms = Math.max(0, Number(body.rooms) || 0);
+        metrics.messageRate = Math.max(0, Number(body.msgRate) || 0);
+        metrics.lastReport = Date.now();
+        metrics.reportCount++;
 
-        // Sanitize — strip anything dangerous, cap string lengths
-        const record = {
-          peerId: body.peerId.slice(0, 128),
-          agentName: (body.agentName || 'anonymous').slice(0, 64).replace(/[^\w\s\-_.]/g, ''),
-          rooms: Array.isArray(body.rooms) ? body.rooms.slice(0, 20).map((r: any) => String(r).slice(0, 64)) : [],
-          capabilities: Array.isArray(body.capabilities) ? body.capabilities.slice(0, 20).map((c: any) => String(c).slice(0, 64)) : [],
-          model: body.model ? {
-            name: String(body.model.name || '').slice(0, 64),
-            params: String(body.model.params || '').slice(0, 16),
-            vram: String(body.model.vram || '').slice(0, 16),
-            backend: String(body.model.backend || '').slice(0, 32),
-            tokensPerSecond: Number(body.model.tokensPerSecond) || 0,
-          } : null,
-          system: body.system ? {
-            cores: Number(body.system.cores) || 0,
-            ramGB: Number(body.system.ramGB) || 0,
-            gpu: String(body.system.gpu || '').slice(0, 128),
-          } : null,
-          role: ['light', 'full', 'storage'].includes(body.role) ? body.role : 'full',
-          version: String(body.version || '').slice(0, 32),
-          lastSeen: Date.now(),
-        };
-
-        // Store in KV with TTL — auto-expires if agent stops heartbeating
-        await env.AGENTS.put(
-          AGENT_PREFIX + record.peerId,
-          JSON.stringify(record),
-          { expirationTtl: AGENT_TTL },
-        );
-
-        return json({ ok: true, peerId: record.peerId, ttl: AGENT_TTL });
+        return json({ ok: true });
       }
 
       default: {

@@ -673,3 +673,22 @@ export type {
   BootstrapSource,
   BootstrapResult,
 } from './bootstrap/index.js';
+
+// Phase 5: Trust Policy Engine
+export { DefaultTrustPolicy } from './trust/index.js';
+export type { TrustPolicy, TrustConfig } from './trust/index.js';
+
+// Phase 6: Relay Quotas
+export { RelayQuotaManager, DEFAULT_RELAY_QUOTA } from './relay/index.js';
+export type { RelayReservation, RelayQuotaConfig } from './relay/index.js';
+
+// Phase 7: Retention Policy Engine
+export {
+  RetentionPolicyEngine,
+  DEFAULT_RETENTION,
+} from './storage/index.js';
+export type {
+  RetentionClass,
+  RetentionConfig,
+  StoredObject,
+} from './storage/index.js';

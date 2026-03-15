@@ -126,3 +126,12 @@ export {
   validateCheckpointStructure,
   type RoomCheckpoint,
 } from './checkpoint.js';
+export {
+  RetentionPolicyEngine,
+  DEFAULT_RETENTION,
+} from './retention.js';
+export type {
+  RetentionClass,
+  RetentionConfig,
+  StoredObject,
+} from './retention.js';

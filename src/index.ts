@@ -39,6 +39,9 @@ import {
   type InvokeOpen,
   type InvokeEvent,
 } from './protocols/index.js';
+import { NatsDiscovery } from './nats/index.js';
+import type { NatsAgentAnnouncement } from './nats/index.js';
+import { NknFallback } from './nkn/index.js';
 
 // NexusRoom is re-exported below — import it here first so the named export
 // precedes the export * from './chat/index.js' re-export (NodeNext ESM guard).
@@ -83,6 +86,14 @@ export interface NexusClientOptions {
 
   // x402 micropayment rail
   x402?: Partial<X402Config>;
+
+  // NATS pubsub discovery
+  enableNats?: boolean;      // default true
+  natsServers?: string[];    // override NATS servers
+
+  // NKN fallback addressing (opt-in)
+  enableNkn?: boolean;       // default false
+  nknIdentifier?: string;    // NKN address prefix
 }
 
 export interface CreateRoomOptions {
@@ -120,6 +131,8 @@ export class NexusClient {
   private _isConnected = false;
   private listeners = new Map<string, Set<(value: any) => void>>();
   private _x402: X402PaymentRail | null = null;
+  private natsDiscovery: NatsDiscovery | null = null;
+  private nknFallback: NknFallback | null = null;
 
   constructor(options?: NexusClientOptions) {
     this.config = resolveConfig(options);
@@ -279,6 +292,37 @@ export class NexusClient {
       log.debug(`DHT profile publish deferred: ${err.message}`);
     });
 
+    // NATS discovery — connect and announce
+    if (this.config.enableNats !== false) {
+      this.natsDiscovery = new NatsDiscovery({
+        servers: this.config.natsServers,
+      });
+      const natsConnected = await this.natsDiscovery.connect();
+      if (natsConnected) {
+        await this.natsDiscovery.subscribe((announcement: NatsAgentAnnouncement) => {
+          log.info(`NATS discovered: ${announcement.agentName} (${announcement.peerId.slice(0, 12)}...)`);
+          this.emit('peer:discovered', announcement.peerId);
+        });
+        await this.natsDiscovery.announce({
+          type: 'nexus.announce',
+          peerId: this.identity!.peerId,
+          agentName: this.config.agentName,
+          rooms: this.roomManager?.getJoinedRooms() ?? [],
+          multiaddrs: this.node.getMultiaddrs().map((a: any) => a.toString()),
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // NKN fallback — opt-in
+    if (this.config.enableNkn) {
+      this.nknFallback = new NknFallback({
+        enabled: true,
+        identifier: this.config.nknIdentifier ?? `nexus-${this.identity!.peerId.slice(-8)}`,
+      });
+      await this.nknFallback.connect();
+    }
+
     this._isConnected = true;
     log.info('Connected to OpenAgents Nexus');
     log.info(
@@ -304,6 +348,18 @@ export class NexusClient {
     // Leave all rooms
     if (this.roomManager) {
       await this.roomManager.leaveAll();
+    }
+
+    // Disconnect NATS
+    if (this.natsDiscovery) {
+      await this.natsDiscovery.disconnect();
+      this.natsDiscovery = null;
+    }
+
+    // Disconnect NKN
+    if (this.nknFallback) {
+      await this.nknFallback.disconnect();
+      this.nknFallback = null;
     }
 
     // Stop storage
@@ -596,6 +652,14 @@ export class NexusClient {
       storage: this.storageManager,
     };
   }
+
+  get nats(): NatsDiscovery | null {
+    return this.natsDiscovery;
+  }
+
+  get nkn(): NknFallback | null {
+    return this.nknFallback;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,3 +786,11 @@ export type {
   RetentionConfig,
   StoredObject,
 } from './storage/index.js';
+
+// NATS pubsub discovery
+export { NatsDiscovery, DEFAULT_NATS_CONFIG, NATS_DISCOVERY_SERVERS, NATS_DISCOVERY_SUBJECT, NATS_PRESENCE_SUBJECT } from './nats/index.js';
+export type { NatsDiscoveryConfig, NatsAgentAnnouncement } from './nats/index.js';
+
+// NKN fallback addressing
+export { NknFallback, DEFAULT_NKN_CONFIG } from './nkn/index.js';
+export type { NknConfig, NknAddressInfo } from './nkn/index.js';

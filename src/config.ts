@@ -34,6 +34,14 @@ export interface NexusConfig {
   manifestUrls?: string[];
   cachePath?: string;
 
+  // NATS pubsub discovery
+  enableNats?: boolean;
+  natsServers?: string[];
+
+  // NKN fallback addressing (opt-in)
+  enableNkn?: boolean;
+  nknIdentifier?: string;
+
   // Timeouts
   connectionTimeoutMs: number;
   syncTimeoutMs: number;

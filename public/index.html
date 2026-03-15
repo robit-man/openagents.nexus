@@ -30,10 +30,10 @@
     --green-dim: #cccccc;
     --green-glow: rgba(255,255,255,0.15);
     --font: 'Courier New', 'SF Mono', 'Fira Code', monospace;
-    --sidebar-w: 260px;
-    --sidebar-r: 280px;
-    --header-h: 56px;
-    --bottom-h: 120px;
+    --sidebar-w: 200px;
+    --sidebar-r: 220px;
+    --header-h: 0px;
+    --bottom-h: 80px;
     --panel-bg: rgba(0,0,0,0.82);
     --panel-border: rgba(255,255,255,0.07);
   }
@@ -57,21 +57,8 @@
     display: block;
   }
 
-  /* ── HEADER ── */
-  #header {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    height: var(--header-h);
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 20px;
-    background: rgba(0,0,0,0.7);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: none;
-  }
+  /* ── HEADER (hidden — content moved to sidebars) ── */
+  #header { display: none; }
 
   #header .logo {
     font-size: 15px;
@@ -134,7 +121,7 @@
   /* ── LEFT SIDEBAR ── */
   #sidebar-left {
     position: fixed;
-    top: var(--header-h);
+    top: 12px;
     left: 0;
     bottom: var(--bottom-h);
     width: var(--sidebar-w);
@@ -148,7 +135,7 @@
 
   #sidebar-right {
     position: fixed;
-    top: var(--header-h);
+    top: 12px;
     right: 0;
     bottom: var(--bottom-h);
     width: var(--sidebar-r);
@@ -161,24 +148,12 @@
   }
 
   .sidebar-header {
-    padding: 10px 14px 8px;
-    border-bottom: 1px solid var(--panel-border);
-    font-size: 9px;
-    letter-spacing: 0.2em;
-    color: var(--green);
+    padding: 6px 10px 5px;
+    border-bottom: none;
+    font-size: 8px;
+    letter-spacing: 0.25em;
+    color: #555;
     text-transform: uppercase;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .sidebar-header::before {
-    content: '';
-    display: inline-block;
-    width: 6px; height: 6px;
-    background: var(--green);
-    border-radius: 50%;
-    box-shadow: 0 0 6px var(--green);
     flex-shrink: 0;
   }
 
@@ -212,10 +187,9 @@
     margin-bottom: 6px;
   }
   .peer-dot {
-    width: 6px; height: 6px;
+    width: 4px; height: 4px;
     border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 5px var(--green);
+    background: #666;
     flex-shrink: 0;
   }
   .peer-name-text {
@@ -310,34 +284,34 @@
     flex: 1;
     flex-direction: column;
     padding: 8px 0;
-    border-right: 1px solid var(--panel-border);
+    border-right: none;
     height: 100%;
-    gap: 4px;
+    gap: 2px;
     min-width: 0;
   }
   .dial-container:last-child { border-right: none; }
 
   .dial-svg-wrap {
     position: relative;
-    width: 64px;
-    height: 64px;
+    width: 44px;
+    height: 44px;
     flex-shrink: 0;
   }
   .dial-svg {
-    width: 64px;
-    height: 64px;
+    width: 44px;
+    height: 44px;
     transform: rotate(-90deg);
     overflow: visible;
   }
   .dial-track {
     fill: none;
     stroke: var(--grey-mid);
-    stroke-width: 4;
+    stroke-width: 2;
   }
   .dial-progress {
     fill: none;
-    stroke: var(--green);
-    stroke-width: 4;
+    stroke: var(--white);
+    stroke-width: 2;
     stroke-linecap: round;
     transition: stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1);
     filter: drop-shadow(0 0 4px var(--green));
@@ -348,9 +322,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
-    font-weight: bold;
-    color: var(--white);
+    font-size: 10px;
+    font-weight: normal;
+    color: #888;
     font-family: var(--font);
     letter-spacing: -0.02em;
     pointer-events: none;
@@ -432,9 +406,9 @@
   <div class="logo" aria-label="OpenAgents Nexus">OPENAGENTS NEXUS</div>
 
   <div class="install-box" id="install-box" role="button" tabindex="0"
-       aria-label="Copy install command: npm i open-agents-nexus"
+       aria-label="Copy install command: npm i -g open-agents-ai"
        title="Click to copy">
-    <code>npm i open-agents-nexus</code>
+    <code>npm i -g open-agents-ai</code>
     <button class="copy-btn" id="copy-btn" aria-label="Copy to clipboard" tabindex="-1">[copy]</button>
   </div>
 
@@ -445,25 +419,38 @@
   </nav>
 </header>
 
-<!-- no tagline -->
+<!-- top install command -->
+<div id="top-cmd" style="
+  position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:100;
+  font-family:var(--font); font-size:10px; color:#555; cursor:pointer;
+  padding:4px 12px; background:rgba(0,0,0,0.5); backdrop-filter:blur(8px);
+  letter-spacing:0.08em;
+" title="click to copy">
+  npm i -g open-agents-ai
+</div>
 
 <!-- COPY TOAST -->
 <div id="copy-toast" role="status" aria-live="polite">Copied!</div>
 
 <!-- LEFT SIDEBAR -->
 <aside id="sidebar-left" aria-label="Network nodes">
-  <div class="sidebar-header">Network Nodes</div>
-  <input type="text" id="node-search" placeholder="search nodes..." autocomplete="off" style="
-    width: calc(100% - 16px); margin: 6px 8px 4px; padding: 5px 8px;
-    background: rgba(255,255,255,0.04); border: none; color: #fff;
-    font-family: var(--font); font-size: 10px; outline: none;
+  <div class="sidebar-header">nodes</div>
+  <input type="text" id="node-search" placeholder="filter..." autocomplete="off" style="
+    width: calc(100% - 12px); margin: 4px 6px 2px; padding: 4px 6px;
+    background: rgba(255,255,255,0.03); border: none; color: #888;
+    font-family: var(--font); font-size: 9px; outline: none;
   ">
   <div id="nodes-list" role="list"></div>
+  <div style="padding:6px 10px;font-size:8px;color:#444;border-top:1px solid rgba(255,255,255,0.04);flex-shrink:0">
+    <span id="install-box" style="cursor:pointer;color:#666" title="copy">npm i -g open-agents-ai</span>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/robit-man/openagents.nexus" target="_blank" rel="noopener" style="color:#444;text-decoration:none">src</a>
+  </div>
 </aside>
 
 <!-- RIGHT SIDEBAR -->
 <aside id="sidebar-right" aria-label="Network activity log">
-  <div class="sidebar-header">Network Activity</div>
+  <div class="sidebar-header">activity</div>
   <div id="activity-log" role="log" aria-live="polite" aria-relevant="additions"></div>
 </aside>
 
@@ -1032,7 +1019,8 @@ function buildSceneFromBootstrap(bootstrapPeers) {
     addNode(label, i, unique.length);
   });
 
-  if (nodes.length >= 2) buildConnections();
+  // No connections built — bootstrap nodes sit as static points
+  // Connections + particles only appear when real agents connect via reconcileNetworkPeers
 }
 
 // ─────────────────────────────────────────────
@@ -1040,22 +1028,18 @@ function buildSceneFromBootstrap(bootstrapPeers) {
 // ─────────────────────────────────────────────
 let knownPeerCount = 0;
 
+// Only show REAL connected nexus agents — not bootstrap infrastructure
 function reconcileNetworkPeers(network) {
   const apiCount = network.peerCount || 0;
-  if (apiCount <= nodes.length) return; // nothing new to show
+  if (apiCount <= 0 || apiCount <= nodes.length) return;
 
-  // Add anonymous peer nodes for any peers beyond bootstrap set
-  const extraCount = apiCount - nodes.length;
+  const newCount = apiCount - nodes.length;
   const totalBefore = nodes.length;
-  for (let i = 0; i < extraCount; i++) {
-    addNode(`peer-${totalBefore + i}`, totalBefore + i, totalBefore + extraCount);
+  for (let i = 0; i < newCount; i++) {
+    addNode(`agent-${totalBefore + i}`, totalBefore + i, totalBefore + newCount);
   }
-  // Rebuild connections to include new nodes
   buildConnections();
-
-  if (extraCount > 0) {
-    pushLog(`<span class="log-highlight">${extraCount}</span> new peer${extraCount > 1 ? 's' : ''} joined the network`);
-  }
+  pushLog(`<span class="log-highlight">${newCount}</span> agent${newCount > 1 ? 's' : ''} connected`);
 }
 
 // ─────────────────────────────────────────────
@@ -1080,11 +1064,12 @@ async function fetchBootstrap() {
       if (rooms > 0) pushLog(`Found <span class="log-highlight">${rooms}</span> room${rooms !== 1 ? 's' : ''}`);
     }
 
-    // Build Three.js scene
-    buildSceneFromBootstrap(peers);
-
-    // Build sidebar cards
+    // Sidebar shows bootstrap infrastructure
     renderPeerCards(peers);
+
+    // Show bootstrap nodes as static spheres in the scene (no connections, no particles)
+    // Connections + particles only appear when real agents connect
+    buildSceneFromBootstrap(peers);
 
     // Set dials with bootstrap network data
     if (data.network) updateDials(data.network, bootstrapPeerCount);
@@ -1121,29 +1106,19 @@ fetchBootstrap().then(() => {
 // ─────────────────────────────────────────────
 const installBox = document.getElementById('install-box');
 const copyToast  = document.getElementById('copy-toast');
-const INSTALL_CMD = 'npm i open-agents-nexus';
+const INSTALL_CMD = 'npm i -g open-agents-ai';
 
 function doCopy() {
   navigator.clipboard.writeText(INSTALL_CMD).then(() => {
     copyToast.classList.add('show');
-    setTimeout(() => copyToast.classList.remove('show'), 2000);
-  }).catch(() => {
-    const ta = document.createElement('textarea');
-    ta.value = INSTALL_CMD;
-    ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    copyToast.classList.add('show');
-    setTimeout(() => copyToast.classList.remove('show'), 2000);
-  });
+    setTimeout(() => copyToast.classList.remove('show'), 1500);
+  }).catch(() => {});
 }
 
+// Both the sidebar link and top command trigger copy
 installBox.addEventListener('click', doCopy);
-installBox.addEventListener('keydown', e => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
-});
+const topCmd = document.getElementById('top-cmd');
+if (topCmd) topCmd.addEventListener('click', doCopy);
 
 // ─────────────────────────────────────────────
 //  NODE SEARCH

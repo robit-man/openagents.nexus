@@ -1,0 +1,84 @@
+{
+  "name": "@openagents/nexus",
+  "version": "0.1.0",
+  "description": "Decentralized agent communication platform - DHT, signaling, chat, IPFS storage",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "nexus": "./dist/cli.js",
+    "@openagents/nexus": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "!dist/**/__tests__/**",
+    "!dist/**/*.test.*",
+    "LICENSE",
+    "ARCHITECTURE.md"
+  ],
+  "scripts": {
+    "dev": "node --import tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robit-man/openagents.nexus.git"
+  },
+  "keywords": [
+    "decentralized",
+    "p2p",
+    "libp2p",
+    "ipfs",
+    "dht",
+    "gossipsub",
+    "agent",
+    "chat",
+    "openagents"
+  ],
+  "author": "",
+  "license": "AGPL-3.0",
+  "bugs": {
+    "url": "https://github.com/robit-man/openagents.nexus/issues"
+  },
+  "homepage": "https://github.com/robit-man/openagents.nexus#readme",
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^17.0.0",
+    "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@helia/dag-json": "^5.0.7",
+    "@helia/json": "^5.0.7",
+    "@helia/strings": "^5.0.7",
+    "@helia/unixfs": "^7.0.4",
+    "@libp2p/bootstrap": "^12.0.14",
+    "@libp2p/gossipsub": "^15.0.15",
+    "@libp2p/identify": "^4.0.13",
+    "@libp2p/kad-dht": "^16.1.6",
+    "@libp2p/mdns": "^12.0.14",
+    "@libp2p/tcp": "^11.0.13",
+    "@libp2p/webrtc": "^6.0.14",
+    "@libp2p/websockets": "^10.1.6",
+    "helia": "^6.0.21",
+    "libp2p": "^3.1.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

@@ -184,13 +184,28 @@ export default {
       }
 
       default: {
-        // Serve static assets — add headers to prevent Cloudflare script injection
+        // Serve static assets — strip any Cloudflare-injected scripts
         const assetResponse = await env.ASSETS.fetch(request);
-        const response = new Response(assetResponse.body, assetResponse);
-        // Tell Cloudflare edge NOT to modify this response
-        response.headers.set('cf-edge-cache', 'no-store');
-        response.headers.set('server-timing', 'cf-no-transform');
-        return response;
+        const contentType = assetResponse.headers.get('content-type') || '';
+
+        if (contentType.includes('text/html')) {
+          let html = await assetResponse.text();
+          // Remove Cloudflare injected SES lockdown and beacon scripts
+          html = html.replace(/<script[^>]*cloudflareinsights[^>]*>[\s\S]*?<\/script>/gi, '');
+          html = html.replace(/<script[^>]*lockdown[^>]*>[\s\S]*?<\/script>/gi, '');
+          html = html.replace(/<script[^>]*cdn-cgi[^>]*>[\s\S]*?<\/script>/gi, '');
+          html = html.replace(/<script[^>]*beacon\.min\.js[^>]*>[\s\S]*?<\/script>/gi, '');
+
+          return new Response(html, {
+            status: assetResponse.status,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'X-Content-Type-Options': 'nosniff',
+            },
+          });
+        }
+
+        return assetResponse;
       }
     }
   },

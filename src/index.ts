@@ -307,28 +307,11 @@ export class NexusClient {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    const hubUrl = this.config.signalingServer;
-    const reportUrl = `${hubUrl}/api/v1/report`;
-
-    const body = {
-      peerId: this.identity!.peerId,
-      agentName: this.config.agentName,
-      rooms: this.roomManager?.getJoinedRooms() ?? [],
-      capabilities: [],
-      role: this.config.role,
-      version: '0.3.0',
-    };
-
-    try {
-      await fetch(reportUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5_000),
-      });
-    } catch {
-      // Silent — hub might not be reachable
-    }
+    // Heartbeat is P2P-native: presence is announced via GossipSub,
+    // NOT via centralized HTTP POST to avoid KV/quota exhaustion.
+    // The hub's /api/v1/report endpoint is disabled.
+    // Presence is soft-state: peers learn about us through pubsub
+    // discovery topics and direct DHT advertisements.
   }
 
   // --- Rooms ---

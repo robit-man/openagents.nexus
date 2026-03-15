@@ -1039,7 +1039,7 @@ function reconcileAgents(networkData) {
         // Check if they share a room
         const a = Array.from(knownAgents.values())[i].data;
         const b = Array.from(knownAgents.values())[j].data;
-        const sharedRooms = (a.rooms || []).filter((r: string) => (b.rooms || []).includes(r));
+        const sharedRooms = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
         if (sharedRooms.length > 0) {
           addConnection(agentIndices[i], agentIndices[j]);
         }
@@ -1127,8 +1127,9 @@ async function fetchNetwork() {
 pushLog('Fetching network state...');
 
 fetchBootstrap().then(() => {
-  // Poll every 15 seconds for network updates
-  setInterval(fetchNetwork, 15000);
+  // Fetch live agents immediately, then poll every 10 seconds
+  fetchNetwork();
+  setInterval(fetchNetwork, 10000);
 });
 
 // ─────────────────────────────────────────────

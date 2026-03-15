@@ -1,10 +1,19 @@
 # Cloudflare Pages configuration for openagents.nexus
-# The functions/ directory contains Pages Functions (serverless API endpoints)
-# The public/ directory contains static assets (landing page)
+#
+# DEPLOYMENT SETUP (in Cloudflare Pages dashboard):
+#   Build command:        (leave empty, or use: echo "static site")
+#   Build output directory: public
+#   Root directory:         /
+#
+# The functions/ directory is AUTO-DETECTED by Cloudflare Pages.
+# No build step needed — the frontend is static HTML + CDN Three.js,
+# and the API endpoints are Pages Functions (serverless).
+#
+# DO NOT run "npm run build" as the build command — that compiles
+# the npm package (libp2p/Helia), which is NOT needed for the website.
+# The website and the npm package are independent deployables.
 
 name = "openagents-nexus"
 pages_build_output_dir = "public"
 compatibility_date = "2024-09-25"
-
-# No build command needed — functions/ are auto-detected by Cloudflare Pages
-# Static assets in public/ are served directly
+compatibility_flags = ["nodejs_compat"]

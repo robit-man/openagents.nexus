@@ -11,11 +11,12 @@ describe('Protocol constants', () => {
   });
 
   it('PROTOCOLS contains all expected protocol identifiers', () => {
-    expect(PROTOCOLS.DHT).toBe('/nexus/kad/1.0.0');
+    expect(PROTOCOLS.DHT).toBe('/nexus/kad/1.1.0');
     expect(PROTOCOLS.SYNC).toBe('/nexus/sync/1.0.0');
-    expect(PROTOCOLS.HANDSHAKE).toBe('/nexus/handshake/1.0.0');
-    expect(PROTOCOLS.DM).toBe('/nexus/dm/1.0.0');
-    expect(PROTOCOLS.CAPABILITY_INVOKE).toBe('/nexus/capability/invoke/1.0.0');
+    expect(PROTOCOLS.HANDSHAKE).toBe('/nexus/handshake/1.1.0');
+    expect(PROTOCOLS.DM).toBe('/nexus/dm/1.1.0');
+    expect(PROTOCOLS.CAPABILITY_INVOKE).toBe('/nexus/invoke/1.1.0');
+    expect(PROTOCOLS.CHAT_SYNC).toBe('/nexus/chat-sync/1.1.0');
   });
 
   it('TOPICS contains all expected topic prefixes', () => {

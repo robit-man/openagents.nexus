@@ -3,11 +3,12 @@ export const PROTOCOL_VERSION = 1 as const;
 
 // Custom protocol identifiers
 export const PROTOCOLS = {
-  DHT: '/nexus/kad/1.0.0',
-  SYNC: '/nexus/sync/1.0.0',
-  HANDSHAKE: '/nexus/handshake/1.0.0',
-  DM: '/nexus/dm/1.0.0',
-  CAPABILITY_INVOKE: '/nexus/capability/invoke/1.0.0',
+  DHT: '/nexus/kad/1.1.0',
+  SYNC: '/nexus/sync/1.0.0', // legacy, keep for compat
+  HANDSHAKE: '/nexus/handshake/1.1.0',
+  DM: '/nexus/dm/1.1.0',
+  CAPABILITY_INVOKE: '/nexus/invoke/1.1.0',
+  CHAT_SYNC: '/nexus/chat-sync/1.1.0',
 } as const;
 
 // GossipSub topic prefixes

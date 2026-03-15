@@ -15,7 +15,7 @@ import { StorageManager } from './storage/index.js';
 import { fetchBootstrapPeers } from './signaling/onboarding.js';
 import { resolveDiscovery, buildBootstrapList } from './discovery.js';
 import { createLogger } from './logger.js';
-import { encodeMessage, roomTopic, TOPICS } from './protocol/index.js';
+import { encodeMessage, roomTopic, TOPICS, uuidv7 } from './protocol/index.js';
 import type {
   AgentProfile,
   RoomManifest,
@@ -26,6 +26,13 @@ import type {
 import { sanitizeName } from './security/validators.js';
 import { X402PaymentRail } from './x402/index.js';
 import type { X402Config } from './x402/index.js';
+import {
+  STREAM_PROTOCOLS,
+  encodeStreamMessage,
+  decodeStreamMessage,
+  type InvokeOpen,
+  type InvokeEvent,
+} from './protocols/index.js';
 
 // NexusRoom is re-exported below — import it here first so the named export
 // precedes the export * from './chat/index.js' re-export (NodeNext ESM guard).
@@ -381,6 +388,112 @@ export class NexusClient {
     return this.dhtManager!.registry.findProfile(peerId);
   }
 
+  // --- Direct stream protocols ---
+
+  /**
+   * Invoke a named capability on a remote peer via the /nexus/invoke/1.1.0 stream protocol.
+   *
+   * In unary mode (options.stream = false, the default) the method resolves with
+   * the aggregated output once the provider sends invoke.done.
+   *
+   * In streaming mode (options.stream = true) the method resolves with an
+   * AsyncIterable<InvokeEvent> that yields each provider event as it arrives.
+   *
+   * The underlying bidirectional stream is opened with node.dialProtocol() and
+   * closed when the provider sends invoke.done or invoke.error.
+   */
+  async invokeCapability(
+    peerId: string,
+    capability: string,
+    input: unknown,
+    options?: { stream?: boolean; maxDurationMs?: number },
+  ): Promise<unknown | AsyncIterable<InvokeEvent>> {
+    this.ensureConnected();
+
+    const requestId = uuidv7();
+    const maxDurationMs = options?.maxDurationMs ?? 30_000;
+    const streamMode = options?.stream ?? false;
+
+    const stream = await this.node.dialProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
+
+    // Send invoke.open
+    const open: InvokeOpen = {
+      type: 'invoke.open',
+      version: 1,
+      requestId,
+      capability,
+      inputFormat: 'application/json',
+      outputMode: streamMode ? 'stream' : 'unary',
+      maxDurationMs,
+      maxInputBytes: 65_536,
+      maxOutputBytes: 1_048_576,
+    };
+    await stream.sink([encodeStreamMessage(open)]);
+
+    // Send input chunk
+    const chunk = encodeStreamMessage({
+      type: 'invoke.chunk',
+      version: 1,
+      requestId,
+      seq: 0,
+      isFinalInput: true,
+      data: input,
+    });
+    await stream.sink([chunk]);
+
+    if (streamMode) {
+      // Return an async iterable of InvokeEvent messages
+      async function* iterateEvents(): AsyncIterable<InvokeEvent> {
+        for await (const data of stream.source) {
+          const msg = decodeStreamMessage(
+            data instanceof Uint8Array ? data : (data as { subarray?: () => Uint8Array }).subarray?.() ?? new Uint8Array(0),
+          );
+          if (!msg) continue;
+          if (msg.type === 'invoke.event') yield msg;
+          if (msg.type === 'invoke.done' || msg.type === 'invoke.error') break;
+          if (msg.type === 'invoke.cancel') break;
+        }
+      }
+      return iterateEvents();
+    }
+
+    // Unary mode: collect all events and return aggregated output
+    const events: InvokeEvent[] = [];
+    for await (const data of stream.source) {
+      const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
+      const msg = decodeStreamMessage(raw);
+      if (!msg) continue;
+      if (msg.type === 'invoke.event') events.push(msg);
+      if (msg.type === 'invoke.done') break;
+      if (msg.type === 'invoke.error') {
+        throw new Error(`invoke.error [${msg.code}]: ${msg.message}`);
+      }
+      if (msg.type === 'invoke.cancel') {
+        throw new Error(`Invocation cancelled: ${msg.reason}`);
+      }
+    }
+
+    // Aggregate event data into a single result
+    if (events.length === 1) return events[0].data;
+    if (events.length > 1) return events.map(e => e.data);
+    return null;
+  }
+
+  /**
+   * Send a private direct message to a peer via the /nexus/dm/1.1.0 stream protocol.
+   * The stream is opened, the message is sent, and the stream is closed.
+   */
+  async sendDM(peerId: string, content: string, format = 'text/plain'): Promise<void> {
+    this.ensureConnected();
+
+    const stream = await this.node.dialProtocol(peerId, STREAM_PROTOCOLS.DM);
+    const dmMsg = new TextEncoder().encode(
+      JSON.stringify({ type: 'dm.message', version: 1, messageId: uuidv7(), contentFormat: format, content }) + '\n',
+    );
+    await stream.sink([dmMsg]);
+    stream.close?.();
+  }
+
   // --- Storage ---
 
   async store(data: Uint8Array | string | object): Promise<string> {
@@ -505,3 +618,28 @@ export type {
   X402Config,
 } from './x402/index.js';
 export { DEFAULT_X402_CONFIG } from './x402/index.js';
+export {
+  STREAM_PROTOCOLS,
+  INVOKE_PROTOCOL,
+  HANDSHAKE_PROTOCOL,
+  DM_PROTOCOL,
+  CHAT_SYNC_PROTOCOL,
+  encodeStreamMessage,
+  decodeStreamMessage,
+} from './protocols/index.js';
+export type {
+  InvokeOpen,
+  InvokeChunk,
+  InvokeAccept,
+  InvokeEvent,
+  InvokeDone,
+  InvokeError,
+  InvokeCancel,
+  InvokeMessage,
+  InvokeHandler,
+  HandshakeInit,
+  HandshakeAck,
+  DmMessage,
+  SyncRequest,
+  SyncResponse,
+} from './protocols/index.js';

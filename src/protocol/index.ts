@@ -6,6 +6,8 @@ import {
 } from './types.js';
 
 export * from './types.js';
+export * from './pointer-envelope.js';
+export * from './signing.js';
 
 // UUIDv7 generation (no external dependency)
 // UUIDv7 = unix_ms (48 bits) + version (4 bits) + rand_a (12 bits) + variant (2 bits) + rand_b (62 bits)

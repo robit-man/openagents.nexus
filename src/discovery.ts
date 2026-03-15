@@ -30,7 +30,7 @@
  *
  *   Level 6: DHT Random Walk
  *     → Once connected to ANY peer, DHT walking finds more
- *     → Our private /nexus/kad/1.0.0 DHT self-discovers
+ *     → Our private /nexus/kad/1.1.0 DHT self-discovers
  */
 
 // ═══════════════════════════════════════════════════════════════════

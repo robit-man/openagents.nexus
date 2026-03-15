@@ -6,7 +6,7 @@
  * - Encryption: Noise
  * - Muxer: Yamux
  * - Discovery: mDNS, Bootstrap (when peers provided), Pubsub Peer Discovery
- * - Services: Identify, KadDHT (/nexus/kad/1.0.0), GossipSub, Circuit Relay Server
+ * - Services: Identify, KadDHT (/nexus/kad/1.1.0), GossipSub, Circuit Relay Server
  *
  * Discovery cascade (in priority order):
  *   1. Signaling Server peers — callers must pass these in via signalingPeers
@@ -51,7 +51,7 @@ const log = createLogger('node');
  *   - Noise connection encryption
  *   - Yamux stream multiplexing
  *   - Identify service for protocol/address exchange
- *   - KadDHT on the /nexus/kad/1.0.0 protocol (client mode for 'light' role)
+ *   - KadDHT on the /nexus/kad/1.1.0 protocol (client mode for 'light' role)
  *   - GossipSub for pub/sub messaging
  *   - Pubsub peer discovery on the global nexus discovery topic
  *   - mDNS for local-network peer discovery (controllable via discoveryConfig)

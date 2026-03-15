@@ -15,7 +15,7 @@
 import { INDEX_HTML } from './html.js';
 
 interface Env {
-  DIRECTORY: KVNamespace;
+  AGENTS: KVNamespace;
 }
 
 const PUBLIC_BOOTSTRAP = [
@@ -85,7 +85,7 @@ export default {
       case '/api/v1/bootstrap': {
         let knownAgents: string[] = [];
         try {
-          const stored = await env.DIRECTORY.get('known-agents', 'json') as any;
+          const stored = await env.AGENTS.get('known-agents', 'json') as any;
           if (stored?.addresses) knownAgents = stored.addresses;
         } catch { /* KV miss is fine */ }
 
@@ -109,7 +109,7 @@ export default {
       case '/api/v1/network': {
         let snapshot: any = null;
         try {
-          snapshot = await env.DIRECTORY.get('network-snapshot', 'json');
+          snapshot = await env.AGENTS.get('network-snapshot', 'json');
         } catch { /* miss is fine */ }
 
         return json({
@@ -127,7 +127,7 @@ export default {
       // ── Room list ──
       case '/api/v1/rooms': {
         let snapshot: any = null;
-        try { snapshot = await env.DIRECTORY.get('network-snapshot', 'json'); } catch {}
+        try { snapshot = await env.AGENTS.get('network-snapshot', 'json'); } catch {}
 
         return json({
           rooms: snapshot?.rooms || [{ roomId: 'general', name: 'general', topic: '/nexus/room/general', memberCount: 0, type: 'persistent', access: 'public', manifest: '' }],
@@ -157,7 +157,7 @@ export default {
         if (request.method === 'GET') {
           // Read the directory
           try {
-            const dir = await env.DIRECTORY.get('known-agents', 'json');
+            const dir = await env.AGENTS.get('known-agents', 'json');
             return json(dir || { addresses: [], agents: [], updatedAt: 0 });
           } catch {
             return json({ addresses: [], agents: [], updatedAt: 0 });
@@ -183,7 +183,7 @@ export default {
         // Read existing directory
         let existing: any;
         try {
-          existing = await env.DIRECTORY.get('known-agents', 'json') || { addresses: [], agents: [] };
+          existing = await env.AGENTS.get('known-agents', 'json') || { addresses: [], agents: [] };
         } catch {
           existing = { addresses: [], agents: [] };
         }
@@ -216,10 +216,10 @@ export default {
         };
 
         // Write to KV — this is the only write, max once per 60s
-        await env.DIRECTORY.put('known-agents', JSON.stringify(directory));
+        await env.AGENTS.put('known-agents', JSON.stringify(directory));
 
         // Also snapshot network state
-        await env.DIRECTORY.put('network-snapshot', JSON.stringify({
+        await env.AGENTS.put('network-snapshot', JSON.stringify({
           peerCount: capped.length,
           roomCount: new Set(capped.flatMap((a: any) => a.rooms || [])).size || 1,
           rooms: Array.from(new Set(capped.flatMap((a: any) => a.rooms || ['general']))).map(r => ({

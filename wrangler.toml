@@ -5,5 +5,5 @@ compatibility_date = "2026-03-15"
 # KV for low-frequency persistent directory snapshots only
 # Max 1 write per 60 seconds — addresses, not live state
 [[kv_namespaces]]
-binding = "DIRECTORY"
+binding = "AGENTS"
 id = "be508dc2d8f94722a6f9d7377f0bfc8a"

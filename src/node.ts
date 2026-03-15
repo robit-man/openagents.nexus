@@ -36,7 +36,7 @@ import type { NexusConfig } from './config.js';
 import {
   resolveDiscovery,
   buildBootstrapList,
-  NEXUS_DISCOVERY_TOPIC,
+  getDiscoveryTopics,
   type DiscoveryConfig,
 } from './discovery.js';
 import { createLogger } from './logger.js';
@@ -75,6 +75,8 @@ export async function createNexusNode(
     enableCircuitRelay: config.enableCircuitRelay,
     enablePubsubDiscovery: config.enablePubsubDiscovery,
     enableMdns: config.enableMdns,
+    useDnsaddr: config.useDnsaddr,
+    useTcpBootstrap: config.useTcpBootstrap,
     ...discoveryConfig,
   });
 
@@ -97,13 +99,17 @@ export async function createNexusNode(
   }
 
   if (discovery.enablePubsubDiscovery) {
+    // Subscribe to ALL discovery topics for maximum redundancy.
+    // If one mesh is fragmented, agents still find each other via the others.
+    const topics = getDiscoveryTopics();
     peerDiscovery.push(
       pubsubPeerDiscovery({
-        interval: 10_000, // Re-announce every 10 seconds
-        topics: [NEXUS_DISCOVERY_TOPIC],
+        interval: discovery.pubsubDiscoveryIntervalMs ?? 10_000,
+        topics,
         listenOnly: false,
       }),
     );
+    log.info(`Pubsub discovery on ${topics.length} topics: ${topics.join(', ')}`);
   }
 
   // Build transport list — always include circuit relay transport so we can

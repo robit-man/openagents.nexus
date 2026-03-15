@@ -17,11 +17,13 @@ export interface NexusConfig {
   agentName: string;
   agentType: string;
 
-  // Discovery cascade
+  // Discovery cascade (all true by default — maximum connectivity)
   usePublicBootstrap?: boolean;
   enableCircuitRelay?: boolean;
   enablePubsubDiscovery?: boolean;
   enableMdns?: boolean;
+  useDnsaddr?: boolean;
+  useTcpBootstrap?: boolean;
 
   // Storage
   datastorePath?: string;

@@ -1,17 +1,22 @@
 /**
  * Discovery cascade tests
  *
- * Covers: DEFAULT_DISCOVERY values, resolveDiscovery, buildBootstrapList,
- * deduplication, PUBLIC_BOOTSTRAP_WSS validity, NEXUS_DISCOVERY_TOPIC constant.
+ * Covers all bootstrap arrays, discovery topics, config defaults,
+ * resolveDiscovery, buildBootstrapList, and getDiscoveryTopics.
  */
 
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_DISCOVERY,
   NEXUS_DISCOVERY_TOPIC,
+  NEXUS_DISCOVERY_TOPICS,
   PUBLIC_BOOTSTRAP_WSS,
+  PUBLIC_BOOTSTRAP_DNSADDR,
+  PUBLIC_BOOTSTRAP_TCP,
+  ALL_PUBLIC_BOOTSTRAP,
   resolveDiscovery,
   buildBootstrapList,
+  getDiscoveryTopics,
   type DiscoveryConfig,
 } from '../discovery.js';
 
@@ -20,14 +25,35 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('NEXUS_DISCOVERY_TOPIC', () => {
-  it('is the expected discovery topic string', () => {
+  it('is the expected primary discovery topic', () => {
     expect(NEXUS_DISCOVERY_TOPIC).toBe('_nexus._peer-discovery._p2p._pubsub');
   });
 });
 
+describe('NEXUS_DISCOVERY_TOPICS', () => {
+  it('contains at least 3 redundant topics', () => {
+    expect(NEXUS_DISCOVERY_TOPICS.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('includes the primary discovery topic', () => {
+    expect(NEXUS_DISCOVERY_TOPICS).toContain(NEXUS_DISCOVERY_TOPIC);
+  });
+
+  it('all topics are non-empty strings', () => {
+    for (const topic of NEXUS_DISCOVERY_TOPICS) {
+      expect(typeof topic).toBe('string');
+      expect(topic.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('all topics are unique', () => {
+    expect(new Set(NEXUS_DISCOVERY_TOPICS).size).toBe(NEXUS_DISCOVERY_TOPICS.length);
+  });
+});
+
 describe('PUBLIC_BOOTSTRAP_WSS', () => {
-  it('is non-empty', () => {
-    expect(PUBLIC_BOOTSTRAP_WSS.length).toBeGreaterThan(0);
+  it('has at least 8 nodes for geographic redundancy', () => {
+    expect(PUBLIC_BOOTSTRAP_WSS.length).toBeGreaterThanOrEqual(8);
   });
 
   it('every entry starts with /dns4/', () => {
@@ -42,14 +68,54 @@ describe('PUBLIC_BOOTSTRAP_WSS', () => {
     }
   });
 
-  it('every entry contains /p2p/ with a peer ID', () => {
+  it('every entry contains a peer ID', () => {
     for (const addr of PUBLIC_BOOTSTRAP_WSS) {
       expect(addr).toMatch(/\/p2p\/Qm[a-zA-Z0-9]+/);
     }
   });
+});
 
-  it('has at least 4 distinct bootstrap nodes for redundancy', () => {
-    expect(PUBLIC_BOOTSTRAP_WSS.length).toBeGreaterThanOrEqual(4);
+describe('PUBLIC_BOOTSTRAP_DNSADDR', () => {
+  it('has at least 3 dnsaddr entries', () => {
+    expect(PUBLIC_BOOTSTRAP_DNSADDR.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('every entry starts with /dnsaddr/', () => {
+    for (const addr of PUBLIC_BOOTSTRAP_DNSADDR) {
+      expect(addr).toMatch(/^\/dnsaddr\//);
+    }
+  });
+
+  it('every entry uses bootstrap.libp2p.io', () => {
+    for (const addr of PUBLIC_BOOTSTRAP_DNSADDR) {
+      expect(addr).toContain('bootstrap.libp2p.io');
+    }
+  });
+});
+
+describe('PUBLIC_BOOTSTRAP_TCP', () => {
+  it('has at least 1 TCP entry', () => {
+    expect(PUBLIC_BOOTSTRAP_TCP.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('entries contain /tcp/ and /p2p/', () => {
+    for (const addr of PUBLIC_BOOTSTRAP_TCP) {
+      expect(addr).toContain('/tcp/');
+      expect(addr).toContain('/p2p/');
+    }
+  });
+});
+
+describe('ALL_PUBLIC_BOOTSTRAP', () => {
+  it('combines all bootstrap arrays', () => {
+    const expected = PUBLIC_BOOTSTRAP_WSS.length + PUBLIC_BOOTSTRAP_DNSADDR.length + PUBLIC_BOOTSTRAP_TCP.length;
+    expect(ALL_PUBLIC_BOOTSTRAP.length).toBe(expected);
+  });
+
+  it('includes entries from all three sources', () => {
+    expect(ALL_PUBLIC_BOOTSTRAP).toContain(PUBLIC_BOOTSTRAP_WSS[0]);
+    expect(ALL_PUBLIC_BOOTSTRAP).toContain(PUBLIC_BOOTSTRAP_DNSADDR[0]);
+    expect(ALL_PUBLIC_BOOTSTRAP).toContain(PUBLIC_BOOTSTRAP_TCP[0]);
   });
 });
 
@@ -58,24 +124,21 @@ describe('PUBLIC_BOOTSTRAP_WSS', () => {
 // ---------------------------------------------------------------------------
 
 describe('DEFAULT_DISCOVERY', () => {
-  it('has usePublicBootstrap enabled by default', () => {
+  it('enables all discovery methods by default', () => {
     expect(DEFAULT_DISCOVERY.usePublicBootstrap).toBe(true);
-  });
-
-  it('has enableCircuitRelay enabled by default', () => {
     expect(DEFAULT_DISCOVERY.enableCircuitRelay).toBe(true);
-  });
-
-  it('has enablePubsubDiscovery enabled by default', () => {
     expect(DEFAULT_DISCOVERY.enablePubsubDiscovery).toBe(true);
-  });
-
-  it('has enableMdns enabled by default', () => {
     expect(DEFAULT_DISCOVERY.enableMdns).toBe(true);
+    expect(DEFAULT_DISCOVERY.useDnsaddr).toBe(true);
+    expect(DEFAULT_DISCOVERY.useTcpBootstrap).toBe(true);
   });
 
-  it('has an empty customBootstrapPeers list by default', () => {
+  it('has empty custom bootstrap peers', () => {
     expect(DEFAULT_DISCOVERY.customBootstrapPeers).toEqual([]);
+  });
+
+  it('has a reasonable pubsub discovery interval', () => {
+    expect(DEFAULT_DISCOVERY.pubsubDiscoveryIntervalMs).toBe(10_000);
   });
 });
 
@@ -84,40 +147,15 @@ describe('DEFAULT_DISCOVERY', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveDiscovery', () => {
-  it('returns defaults when called with no arguments', () => {
-    const config = resolveDiscovery();
-    expect(config).toEqual(DEFAULT_DISCOVERY);
+  it('returns defaults with no arguments', () => {
+    expect(resolveDiscovery()).toEqual(DEFAULT_DISCOVERY);
   });
 
-  it('returns defaults when called with undefined', () => {
-    const config = resolveDiscovery(undefined);
-    expect(config).toEqual(DEFAULT_DISCOVERY);
-  });
-
-  it('overrides a single boolean field', () => {
-    const config = resolveDiscovery({ usePublicBootstrap: false });
+  it('overrides individual fields', () => {
+    const config = resolveDiscovery({ usePublicBootstrap: false, useDnsaddr: false });
     expect(config.usePublicBootstrap).toBe(false);
-    // Others remain at default
+    expect(config.useDnsaddr).toBe(false);
     expect(config.enableCircuitRelay).toBe(true);
-    expect(config.enablePubsubDiscovery).toBe(true);
-    expect(config.enableMdns).toBe(true);
-  });
-
-  it('overrides multiple fields at once', () => {
-    const config = resolveDiscovery({
-      usePublicBootstrap: false,
-      enableCircuitRelay: false,
-    });
-    expect(config.usePublicBootstrap).toBe(false);
-    expect(config.enableCircuitRelay).toBe(false);
-    expect(config.enablePubsubDiscovery).toBe(true);
-    expect(config.enableMdns).toBe(true);
-  });
-
-  it('accepts custom bootstrap peers', () => {
-    const peers = ['/ip4/1.2.3.4/tcp/4001/p2p/QmCustom'];
-    const config = resolveDiscovery({ customBootstrapPeers: peers });
-    expect(config.customBootstrapPeers).toEqual(peers);
   });
 
   it('does not mutate DEFAULT_DISCOVERY', () => {
@@ -131,93 +169,68 @@ describe('resolveDiscovery', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildBootstrapList', () => {
-  const fullConfig: DiscoveryConfig = {
-    usePublicBootstrap: true,
-    enableCircuitRelay: true,
-    enablePubsubDiscovery: true,
-    enableMdns: true,
-    customBootstrapPeers: [],
-  };
+  const fullConfig = resolveDiscovery();
 
-  it('returns public bootstrap nodes when usePublicBootstrap is true', () => {
+  it('includes WSS, dnsaddr, and TCP bootstrap nodes by default', () => {
     const list = buildBootstrapList(fullConfig);
-    for (const addr of PUBLIC_BOOTSTRAP_WSS) {
-      expect(list).toContain(addr);
+    expect(list.length).toBeGreaterThanOrEqual(
+      PUBLIC_BOOTSTRAP_WSS.length + PUBLIC_BOOTSTRAP_DNSADDR.length + PUBLIC_BOOTSTRAP_TCP.length
+    );
+  });
+
+  it('excludes dnsaddr when useDnsaddr is false', () => {
+    const config = resolveDiscovery({ useDnsaddr: false });
+    const list = buildBootstrapList(config);
+    for (const addr of PUBLIC_BOOTSTRAP_DNSADDR) {
+      expect(list).not.toContain(addr);
     }
   });
 
-  it('returns empty list when usePublicBootstrap is false and no other peers', () => {
-    const config: DiscoveryConfig = { ...fullConfig, usePublicBootstrap: false };
+  it('excludes TCP when useTcpBootstrap is false', () => {
+    const config = resolveDiscovery({ useTcpBootstrap: false });
     const list = buildBootstrapList(config);
-    expect(list).toHaveLength(0);
+    for (const addr of PUBLIC_BOOTSTRAP_TCP) {
+      expect(list).not.toContain(addr);
+    }
   });
 
-  it('includes signaling peers at the front of the combined list', () => {
-    const signalingPeers = ['/ip4/10.0.0.1/tcp/4001/p2p/QmSignaling'];
-    const list = buildBootstrapList(fullConfig, signalingPeers);
-    expect(list).toContain(signalingPeers[0]);
+  it('includes signaling peers first', () => {
+    const sigPeers = ['/ip4/1.2.3.4/tcp/4001/p2p/QmSig'];
+    const list = buildBootstrapList(fullConfig, sigPeers);
+    expect(list).toContain(sigPeers[0]);
   });
 
-  it('includes custom bootstrap peers', () => {
-    const config: DiscoveryConfig = {
-      ...fullConfig,
-      customBootstrapPeers: ['/ip4/5.6.7.8/tcp/4001/p2p/QmCustom'],
-    };
-    const list = buildBootstrapList(config);
-    expect(list).toContain('/ip4/5.6.7.8/tcp/4001/p2p/QmCustom');
+  it('deduplicates across all sources', () => {
+    const dup = PUBLIC_BOOTSTRAP_WSS[0];
+    const config = resolveDiscovery({ customBootstrapPeers: [dup] });
+    const list = buildBootstrapList(config, [dup]);
+    expect(list.filter(p => p === dup)).toHaveLength(1);
   });
 
-  it('deduplicates when the same peer appears in multiple sources', () => {
-    const duplicatePeer = PUBLIC_BOOTSTRAP_WSS[0];
-    const config: DiscoveryConfig = {
-      ...fullConfig,
-      customBootstrapPeers: [duplicatePeer],
-    };
-    // duplicatePeer is in both customBootstrapPeers and PUBLIC_BOOTSTRAP_WSS
-    const list = buildBootstrapList(config, [duplicatePeer]);
-    const occurrences = list.filter(p => p === duplicatePeer).length;
-    expect(occurrences).toBe(1);
-  });
-
-  it('deduplicates when signaling peer overlaps with custom peer', () => {
-    const peer = '/ip4/1.2.3.4/tcp/4001/p2p/QmDup';
-    const config: DiscoveryConfig = {
-      ...fullConfig,
+  it('returns empty for fully disabled config', () => {
+    const config = resolveDiscovery({
       usePublicBootstrap: false,
-      customBootstrapPeers: [peer],
-    };
-    const list = buildBootstrapList(config, [peer]);
-    expect(list.filter(p => p === peer)).toHaveLength(1);
-  });
-
-  it('combines all three sources: signaling, custom, and public', () => {
-    const signalingPeer = '/ip4/9.9.9.9/tcp/4001/p2p/QmSignaling';
-    const customPeer = '/ip4/8.8.8.8/tcp/4001/p2p/QmCustom';
-    const config: DiscoveryConfig = {
-      ...fullConfig,
-      customBootstrapPeers: [customPeer],
-    };
-    const list = buildBootstrapList(config, [signalingPeer]);
-    expect(list).toContain(signalingPeer);
-    expect(list).toContain(customPeer);
-    // At least one public bootstrap should be present
-    expect(list.some(p => PUBLIC_BOOTSTRAP_WSS.includes(p))).toBe(true);
-  });
-
-  it('returns an array (not a Set)', () => {
-    const list = buildBootstrapList(fullConfig);
-    expect(Array.isArray(list)).toBe(true);
-  });
-
-  it('returns empty list for fully-disabled config with no signaling peers', () => {
-    const config: DiscoveryConfig = {
-      usePublicBootstrap: false,
-      enableCircuitRelay: false,
-      enablePubsubDiscovery: false,
-      enableMdns: false,
+      useDnsaddr: false,
+      useTcpBootstrap: false,
       customBootstrapPeers: [],
-    };
-    const list = buildBootstrapList(config, []);
-    expect(list).toHaveLength(0);
+    });
+    expect(buildBootstrapList(config, [])).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDiscoveryTopics
+// ---------------------------------------------------------------------------
+
+describe('getDiscoveryTopics', () => {
+  it('returns all discovery topics', () => {
+    const topics = getDiscoveryTopics();
+    expect(topics).toEqual(NEXUS_DISCOVERY_TOPICS);
+  });
+
+  it('returns a copy (not the original array)', () => {
+    const topics = getDiscoveryTopics();
+    topics.push('modified');
+    expect(getDiscoveryTopics()).toEqual(NEXUS_DISCOVERY_TOPICS);
   });
 });

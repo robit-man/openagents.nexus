@@ -1,0 +1,10 @@
+# Cloudflare Pages configuration for openagents.nexus
+# The functions/ directory contains Pages Functions (serverless API endpoints)
+# The public/ directory contains static assets (landing page)
+
+name = "openagents-nexus"
+pages_build_output_dir = "public"
+compatibility_date = "2024-09-25"
+
+# No build command needed — functions/ are auto-detected by Cloudflare Pages
+# Static assets in public/ are served directly

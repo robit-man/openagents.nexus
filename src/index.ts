@@ -132,6 +132,7 @@ export class NexusClient {
   private listeners = new Map<string, Set<(value: any) => void>>();
   private _x402: X402PaymentRail | null = null;
   private natsDiscovery: NatsDiscovery | null = null;
+  private natsAnnounceTimer: ReturnType<typeof setInterval> | null = null;
   private nknFallback: NknFallback | null = null;
 
   constructor(options?: NexusClientOptions) {
@@ -303,14 +304,9 @@ export class NexusClient {
           log.info(`NATS discovered: ${announcement.agentName} (${announcement.peerId.slice(0, 12)}...)`);
           this.emit('peer:discovered', announcement.peerId);
         });
-        await this.natsDiscovery.announce({
-          type: 'nexus.announce',
-          peerId: this.identity!.peerId,
-          agentName: this.config.agentName,
-          rooms: this.roomManager?.getJoinedRooms() ?? [],
-          multiaddrs: this.node.getMultiaddrs().map((a: any) => a.toString()),
-          timestamp: Date.now(),
-        });
+        await this.announceViaNats();
+        // Re-announce every 60s so the frontend knows we're still alive
+        this.natsAnnounceTimer = setInterval(() => this.announceViaNats(), 60_000);
       }
     }
 
@@ -352,7 +348,11 @@ export class NexusClient {
       await this.roomManager.leaveAll();
     }
 
-    // Disconnect NATS
+    // Stop NATS announce timer and disconnect
+    if (this.natsAnnounceTimer) {
+      clearInterval(this.natsAnnounceTimer);
+      this.natsAnnounceTimer = null;
+    }
     if (this.natsDiscovery) {
       await this.natsDiscovery.disconnect();
       this.natsDiscovery = null;
@@ -409,6 +409,19 @@ export class NexusClient {
     } catch { /* silent — metrics reporting is best-effort */ }
   }
 
+  // Announce current state via NATS so frontend and other agents see us
+  private async announceViaNats(): Promise<void> {
+    if (!this.natsDiscovery?.isConnected || !this.identity) return;
+    await this.natsDiscovery.announce({
+      type: 'nexus.announce',
+      peerId: this.identity.peerId,
+      agentName: this.config.agentName,
+      rooms: this.roomManager?.getJoinedRooms() ?? [],
+      multiaddrs: this.node ? this.node.getMultiaddrs().map((a: any) => a.toString()) : [],
+      timestamp: Date.now(),
+    });
+  }
+
   // Register this agent in the hub's persistent directory (KV-backed, low frequency)
   // Called once on connect — not recurring. The directory is a fallback for agents
   // that can't reach NATS or public bootstrap.
@@ -434,7 +447,10 @@ export class NexusClient {
 
   async joinRoom(roomId: string): Promise<NexusRoom> {
     this.ensureConnected();
-    return this.roomManager!.joinRoom(roomId);
+    const room = await this.roomManager!.joinRoom(roomId);
+    // Re-announce via NATS so the frontend sees updated room membership
+    this.announceViaNats();
+    return room;
   }
 
   async createRoom(options: CreateRoomOptions): Promise<NexusRoom> {

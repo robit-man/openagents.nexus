@@ -1,9 +1,14 @@
 /**
  * Cloudflare Worker — openagents.nexus API
  *
- * Static assets (public/index.html) are served by [assets] in wrangler.toml.
- * This worker handles the API routes that fall through from static.
+ * Static assets served by [assets] in wrangler.toml.
+ * API routes handle bootstrap, network state, and agent reporting.
+ * Live agent data stored in KV with 60s TTL (auto-expires stale agents).
  */
+
+interface Env {
+  AGENTS: KVNamespace;
+}
 
 const PUBLIC_BOOTSTRAP = [
   '/dns4/am6.bootstrap.libp2p.io/tcp/443/wss/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
@@ -30,9 +35,9 @@ const DISCOVERY_TOPICS = [
   '_open-agents._nexus._discovery',
 ];
 
-const CORS_HEADERS = {
+const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
@@ -41,12 +46,27 @@ const CORS_HEADERS = {
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...CORS_HEADERS },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS_HEADERS },
   });
 }
 
+// KV key prefix for agent records
+const AGENT_PREFIX = 'agent:';
+const AGENT_TTL = 60; // seconds — agents must heartbeat within this window
+
+// Get all live agents from KV
+async function getLiveAgents(kv: KVNamespace): Promise<any[]> {
+  const list = await kv.list({ prefix: AGENT_PREFIX });
+  const agents: any[] = [];
+  for (const key of list.keys) {
+    const val = await kv.get(key.name, 'json');
+    if (val) agents.push(val);
+  }
+  return agents;
+}
+
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
@@ -54,6 +74,8 @@ export default {
     }
 
     switch (url.pathname) {
+
+      // ── Bootstrap peers for agent discovery ──
       case '/api/v1/bootstrap':
         return json({
           peers: PUBLIC_BOOTSTRAP,
@@ -61,20 +83,106 @@ export default {
           discoveryTopics: DISCOVERY_TOPICS,
         });
 
-      case '/api/v1/network':
-        return json({
-          peerCount: 0, roomCount: 1, messageRate: 0, storageProviders: 0,
-          protocolVersion: 1, uptime: 0,
-          rooms: [{ roomId: 'general', name: 'General Discussion', topic: '/nexus/room/general', memberCount: 0, type: 'persistent', access: 'public', manifest: '' }],
-        });
+      // ── Live network state (reads from KV) ──
+      case '/api/v1/network': {
+        const agents = await getLiveAgents(env.AGENTS);
+        const rooms = new Set<string>();
+        agents.forEach(a => (a.rooms || []).forEach((r: string) => rooms.add(r)));
+        if (rooms.size === 0) rooms.add('general');
 
-      case '/api/v1/rooms':
         return json({
-          rooms: [{ roomId: 'general', name: 'General Discussion', topic: '/nexus/room/general', memberCount: 0, type: 'persistent', access: 'public', manifest: '' }],
+          peerCount: agents.length,
+          roomCount: rooms.size,
+          messageRate: 0,
+          storageProviders: agents.filter((a: any) => a.role === 'storage').length,
+          protocolVersion: 1,
+          uptime: 0,
+          rooms: Array.from(rooms).map(r => ({
+            roomId: r, name: r, topic: `/nexus/room/${r}`,
+            memberCount: agents.filter((a: any) => (a.rooms || []).includes(r)).length,
+            type: 'persistent', access: 'public', manifest: '',
+          })),
+          agents: agents.map(a => ({
+            peerId: a.peerId,
+            agentName: a.agentName || 'anonymous',
+            rooms: a.rooms || [],
+            capabilities: a.capabilities || [],
+            model: a.model || null,
+            system: a.system || null,
+            role: a.role || 'full',
+            version: a.version || 'unknown',
+            lastSeen: a.lastSeen || 0,
+          })),
         });
+      }
+
+      // ── Room list ──
+      case '/api/v1/rooms': {
+        const agents = await getLiveAgents(env.AGENTS);
+        const rooms = new Set<string>(['general']);
+        agents.forEach(a => (a.rooms || []).forEach((r: string) => rooms.add(r)));
+
+        return json({
+          rooms: Array.from(rooms).map(r => ({
+            roomId: r, name: r, topic: `/nexus/room/${r}`,
+            memberCount: agents.filter((a: any) => (a.rooms || []).includes(r)).length,
+            type: 'persistent', access: 'public', manifest: '',
+          })),
+        });
+      }
+
+      // ── Agent heartbeat/report (POST) ──
+      case '/api/v1/report': {
+        if (request.method !== 'POST') {
+          return json({ error: 'POST required' }, 405);
+        }
+
+        let body: any;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ error: 'Invalid JSON' }, 400);
+        }
+
+        // Validate required field
+        if (!body.peerId || typeof body.peerId !== 'string' || body.peerId.length < 10) {
+          return json({ error: 'Missing or invalid peerId' }, 400);
+        }
+
+        // Sanitize — strip anything dangerous, cap string lengths
+        const record = {
+          peerId: body.peerId.slice(0, 128),
+          agentName: (body.agentName || 'anonymous').slice(0, 64).replace(/[^\w\s\-_.]/g, ''),
+          rooms: Array.isArray(body.rooms) ? body.rooms.slice(0, 20).map((r: any) => String(r).slice(0, 64)) : [],
+          capabilities: Array.isArray(body.capabilities) ? body.capabilities.slice(0, 20).map((c: any) => String(c).slice(0, 64)) : [],
+          model: body.model ? {
+            name: String(body.model.name || '').slice(0, 64),
+            params: String(body.model.params || '').slice(0, 16),
+            vram: String(body.model.vram || '').slice(0, 16),
+            backend: String(body.model.backend || '').slice(0, 32),
+            tokensPerSecond: Number(body.model.tokensPerSecond) || 0,
+          } : null,
+          system: body.system ? {
+            cores: Number(body.system.cores) || 0,
+            ramGB: Number(body.system.ramGB) || 0,
+            gpu: String(body.system.gpu || '').slice(0, 128),
+          } : null,
+          role: ['light', 'full', 'storage'].includes(body.role) ? body.role : 'full',
+          version: String(body.version || '').slice(0, 32),
+          lastSeen: Date.now(),
+        };
+
+        // Store in KV with TTL — auto-expires if agent stops heartbeating
+        await env.AGENTS.put(
+          AGENT_PREFIX + record.peerId,
+          JSON.stringify(record),
+          { expirationTtl: AGENT_TTL },
+        );
+
+        return json({ ok: true, peerId: record.peerId, ttl: AGENT_TTL });
+      }
 
       default:
-        // Fall through to static assets (handled by [assets] in wrangler.toml)
         return new Response('Not found', { status: 404 });
     }
   },

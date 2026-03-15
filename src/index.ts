@@ -262,12 +262,21 @@ export class NexusClient {
         .map((a: any) => a.toString())
         .join(', ')}`,
     );
+
+    // 8. Start heartbeat — report to hub every 30s so the frontend shows this agent
+    this.startHeartbeat();
   }
 
   async disconnect(): Promise<void> {
     if (!this._isConnected) return;
 
     log.info('Disconnecting...');
+
+    // Stop heartbeat
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
 
     // Leave all rooms
     if (this.roomManager) {
@@ -285,6 +294,41 @@ export class NexusClient {
 
     this._isConnected = false;
     log.info('Disconnected');
+  }
+
+  // --- Heartbeat: report to hub so frontend shows this agent ---
+
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  private startHeartbeat(): void {
+    // Report immediately, then every 30s
+    this.sendHeartbeat();
+    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), 30_000);
+  }
+
+  private async sendHeartbeat(): Promise<void> {
+    const hubUrl = this.config.signalingServer;
+    const reportUrl = `${hubUrl}/api/v1/report`;
+
+    const body = {
+      peerId: this.identity!.peerId,
+      agentName: this.config.agentName,
+      rooms: this.roomManager?.getJoinedRooms() ?? [],
+      capabilities: [],
+      role: this.config.role,
+      version: '0.3.0',
+    };
+
+    try {
+      await fetch(reportUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      // Silent — hub might not be reachable
+    }
   }
 
   // --- Rooms ---

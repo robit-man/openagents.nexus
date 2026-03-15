@@ -5,3 +5,10 @@ compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "public"
+
+# KV namespace for live agent registry
+# Create in dashboard: Workers & Pages > KV > Create namespace > "NEXUS_AGENTS"
+# Then bind it here:
+[[kv_namespaces]]
+binding = "AGENTS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

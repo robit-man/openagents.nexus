@@ -934,6 +934,52 @@ function renderPeerCards(bootstrapPeers) {
   });
 }
 
+function renderAgentCards(agents) {
+  // Remove existing agent cards (keep bootstrap cards)
+  document.querySelectorAll('.peer-card.live-agent').forEach(el => el.remove());
+
+  if (!agents || agents.length === 0) return;
+
+  // Insert a separator if there are bootstrap cards
+  const existing = nodesList.querySelectorAll('.peer-card:not(.live-agent)');
+  if (existing.length > 0 && !nodesList.querySelector('.agent-divider')) {
+    const div = document.createElement('div');
+    div.className = 'agent-divider';
+    div.style.cssText = 'padding:4px 10px;font-size:7px;color:#555;letter-spacing:0.2em;text-transform:uppercase;margin-top:6px';
+    div.textContent = 'live agents';
+    nodesList.appendChild(div);
+  }
+
+  agents.forEach(agent => {
+    const card = document.createElement('div');
+    card.className = 'peer-card live-agent';
+    card.setAttribute('role', 'listitem');
+
+    const name = agent.agentName || 'anonymous';
+    const shortId = agent.peerId.slice(0, 8);
+    const model = agent.model?.name || '';
+    const params = agent.model?.params || '';
+    const gpu = agent.system?.gpu || '';
+    const tps = agent.model?.tokensPerSecond ? `${agent.model.tokensPerSecond} tok/s` : '';
+    const rooms = (agent.rooms || []).join(', ') || 'none';
+
+    card.innerHTML = `
+      <div class="peer-name">
+        <div class="peer-dot" style="background:#fff;box-shadow:0 0 4px #fff"></div>
+        <div class="peer-name-text">${name}</div>
+      </div>
+      <div class="peer-meta">
+        <div class="peer-meta-item">${shortId}...</div>
+        <div class="peer-meta-item">${rooms}</div>
+        ${model ? `<div class="peer-meta-item"><strong>${model}</strong> ${params}</div>` : ''}
+        ${tps ? `<div class="peer-meta-item">${tps}</div>` : ''}
+        ${gpu ? `<div class="peer-meta-item" style="grid-column:1/-1">${gpu}</div>` : ''}
+      </div>
+    `;
+    nodesList.appendChild(card);
+  });
+}
+
 // ─────────────────────────────────────────────
 //  THREE.JS — Build scene from bootstrap peers
 // ─────────────────────────────────────────────
@@ -963,18 +1009,46 @@ function buildSceneFromBootstrap(bootstrapPeers) {
 // ─────────────────────────────────────────────
 let knownPeerCount = 0;
 
-// Only show REAL connected nexus agents — not bootstrap infrastructure
-function reconcileNetworkPeers(network) {
-  const apiCount = network.peerCount || 0;
-  if (apiCount <= 0 || apiCount <= nodes.length) return;
+// Track known live agents by peerId
+const knownAgents = new Map(); // peerId -> { index in nodes[], data }
 
-  const newCount = apiCount - nodes.length;
-  const totalBefore = nodes.length;
-  for (let i = 0; i < newCount; i++) {
-    addNode(`agent-${totalBefore + i}`, totalBefore + i, totalBefore + newCount);
+function reconcileAgents(networkData) {
+  const liveAgents = networkData.agents || [];
+  if (liveAgents.length === 0) return;
+
+  let added = 0;
+  liveAgents.forEach(agent => {
+    if (knownAgents.has(agent.peerId)) return; // already rendered
+
+    const label = agent.agentName || agent.peerId.slice(0, 8);
+    const idx = nodes.length;
+    addNode(label, idx, nodes.length + liveAgents.length - added);
+    knownAgents.set(agent.peerId, { index: idx, data: agent });
+    added++;
+
+    pushLog(`<span class="log-highlight">${label}</span> connected` +
+      (agent.model?.name ? ` [${agent.model.name}]` : ''));
+  });
+
+  // Build connections between live agents (not bootstrap nodes)
+  if (added > 0 && knownAgents.size >= 2) {
+    const agentIndices = Array.from(knownAgents.values()).map(a => a.index);
+    // Connect live agents to each other
+    for (let i = 0; i < agentIndices.length; i++) {
+      for (let j = i + 1; j < agentIndices.length; j++) {
+        // Check if they share a room
+        const a = Array.from(knownAgents.values())[i].data;
+        const b = Array.from(knownAgents.values())[j].data;
+        const sharedRooms = (a.rooms || []).filter((r: string) => (b.rooms || []).includes(r));
+        if (sharedRooms.length > 0) {
+          addConnection(agentIndices[i], agentIndices[j]);
+        }
+      }
+    }
   }
-  buildConnections();
-  pushLog(`<span class="log-highlight">${newCount}</span> agent${newCount > 1 ? 's' : ''} connected`);
+
+  // Render agent cards in sidebar
+  renderAgentCards(liveAgents);
 }
 
 // ─────────────────────────────────────────────
@@ -1042,10 +1116,10 @@ async function fetchNetwork() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     updateDials(data, bootstrapPeerCount);
-    reconcileNetworkPeers(data);
-    blinkAllNodes(); // real ping
+    reconcileAgents(data);
+    blinkAllNodes();
   } catch (err) {
-    // Silent poll failure — don't spam the log
+    // Silent poll failure
   }
 }
 

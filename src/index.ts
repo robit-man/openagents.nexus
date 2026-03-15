@@ -195,7 +195,11 @@ export class NexusClient {
     });
     log.info(`Identity: ${this.identity.peerId}`);
 
-    // 2. Resolve the cache path: explicit cachePath > dirname(keyStorePath) > undefined
+    // 2. NATS is disabled inside connect() due to WebSocket conflict with libp2p.
+    // The frontend connects to NATS directly in the browser (no conflict).
+    // Agents register via HTTP /api/v1/directory instead.
+
+    // 3. Resolve the cache path: explicit cachePath > dirname(keyStorePath) > undefined
     const cachePath =
       this.config.cachePath ??
       (this.config.keyStorePath ? path.dirname(this.config.keyStorePath) : undefined);
@@ -234,8 +238,6 @@ export class NexusClient {
     });
 
     // 5. Create and start libp2p node
-    // The resolved bootstrap peers are already in this.config.bootstrapPeers;
-    // pass an empty signalingPeers list since the manager already handled ordering.
     this.node = await createNexusNode(this.config, this.identity.privateKey, discovery, []);
 
     // 6. Set up peer events
@@ -293,21 +295,10 @@ export class NexusClient {
       log.debug(`DHT profile publish deferred: ${err.message}`);
     });
 
-    // NATS discovery — connect and announce
-    if (this.config.enableNats !== false) {
-      this.natsDiscovery = new NatsDiscovery({
-        servers: this.config.natsServers,
-      });
-      const natsConnected = await this.natsDiscovery.connect();
-      if (natsConnected) {
-        await this.natsDiscovery.subscribe((announcement: NatsAgentAnnouncement) => {
-          log.info(`NATS discovered: ${announcement.agentName} (${announcement.peerId.slice(0, 12)}...)`);
-          this.emit('peer:discovered', announcement.peerId);
-        });
-        await this.announceViaNats();
-        // Re-announce every 60s so the frontend knows we're still alive
-        this.natsAnnounceTimer = setInterval(() => this.announceViaNats(), 60_000);
-      }
+    // NATS announce + timer (NATS was connected earlier, before libp2p)
+    if (this.natsDiscovery?.isConnected) {
+      await this.announceViaNats();
+      this.natsAnnounceTimer = setInterval(() => this.announceViaNats(), 60_000);
     }
 
     // NKN fallback — opt-in
@@ -336,6 +327,11 @@ export class NexusClient {
 
     // Register in the hub's persistent directory (one-time, not recurring)
     this.registerInDirectory().catch(() => {});
+
+    // Agent visibility: register in the hub directory via HTTP
+    // This is the primary way the frontend sees agents (KV-backed, low-frequency)
+    // NATS is available for standalone scripts/tests but not inside NexusClient
+    // due to nats.ws/libp2p WebSocket conflict
   }
 
   async disconnect(): Promise<void> {

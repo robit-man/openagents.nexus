@@ -53,6 +53,50 @@ import type { TrustConfig } from './trust/index.js';
 import { MeteringEngine } from './metering/index.js';
 import type { UsageRecord } from './metering/index.js';
 
+// ---------------------------------------------------------------------------
+// Pushable stream writer — wraps a libp2p stream.sink() so we can write
+// multiple messages without half-closing. libp2p's sink() consumes an
+// iterable in a single call and then closes the write side. This adapter
+// creates a long-lived async generator that stays open until end() is called.
+// ---------------------------------------------------------------------------
+
+interface StreamWriter {
+  push(data: Uint8Array): void;
+  end(): void;
+}
+
+function createStreamWriter(stream: any): StreamWriter {
+  const queue: Uint8Array[] = [];
+  let resolve: (() => void) | null = null;
+  let ended = false;
+
+  async function* generate(): AsyncGenerator<Uint8Array> {
+    while (true) {
+      if (queue.length > 0) {
+        yield queue.shift()!;
+      } else if (ended) {
+        return;
+      } else {
+        await new Promise<void>(r => { resolve = r; });
+      }
+    }
+  }
+
+  // Start sinking in background — this single call keeps the write side open
+  stream.sink(generate()).catch(() => {});
+
+  return {
+    push(data: Uint8Array) {
+      queue.push(data);
+      if (resolve) { const r = resolve; resolve = null; r(); }
+    },
+    end() {
+      ended = true;
+      if (resolve) { const r = resolve; resolve = null; r(); }
+    },
+  };
+}
+
 // NexusRoom is re-exported below — import it here first so the named export
 // precedes the export * from './chat/index.js' re-export (NodeNext ESM guard).
 import { NexusRoom } from './chat/index.js';
@@ -640,8 +684,13 @@ export class NexusClient {
 
     const stream = await this.dialPeerProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
 
-    // Send invoke.open
-    const open: InvokeOpen = {
+    // CRITICAL: libp2p streams allow only ONE sink() call. After that the write
+    // side is half-closed. We use a pushable writer so we can send multiple
+    // messages (open, chunk, payment proof) through a single sink() call.
+    const writer = createStreamWriter(stream);
+
+    // Send invoke.open + invoke.chunk in sequence through the single writer
+    writer.push(encodeStreamMessage({
       type: 'invoke.open',
       version: 1,
       requestId,
@@ -651,22 +700,19 @@ export class NexusClient {
       maxDurationMs,
       maxInputBytes: 65_536,
       maxOutputBytes: 1_048_576,
-    };
-    await stream.sink([encodeStreamMessage(open)]);
+    } as InvokeOpen));
 
-    // Send input chunk
-    const chunk = encodeStreamMessage({
+    writer.push(encodeStreamMessage({
       type: 'invoke.chunk',
       version: 1,
       requestId,
       seq: 0,
       isFinalInput: true,
       data: input,
-    });
-    await stream.sink([chunk]);
+    }));
 
     // Helper: handle invoke.payment_required by auto-signing and sending proof
-    const handlePaymentRequired = async (msg: InvokePaymentRequired, s: any): Promise<void> => {
+    const handlePaymentRequired = async (msg: InvokePaymentRequired): Promise<void> => {
       if (!this._x402?.walletAddress) {
         throw new Error('Provider requires payment but x402 wallet is not initialized. Call nexus.x402.initWallet() first.');
       }
@@ -683,9 +729,8 @@ export class NexusClient {
 
       log.info(`Payment required for ${capability}: ${terms.amount} ${terms.currency}`);
 
-      // For $0 free tier, send a stub proof (no real signing needed)
       if (terms.amount === '0') {
-        const proofMsg: InvokePaymentProof = {
+        writer.push(encodeStreamMessage({
           type: 'invoke.payment_proof',
           version: 1,
           requestId,
@@ -699,13 +744,12 @@ export class NexusClient {
             validAfter: 0,
             validBefore: 0,
           },
-        };
-        await s.sink([encodeStreamMessage(proofMsg)]);
+        } as InvokePaymentProof));
         return;
       }
 
       const proof = await this._x402.signPayment(terms);
-      const proofMsg: InvokePaymentProof = {
+      writer.push(encodeStreamMessage({
         type: 'invoke.payment_proof',
         version: 1,
         requestId,
@@ -719,27 +763,26 @@ export class NexusClient {
           validAfter: Number(proof.authorization?.validAfter ?? 0),
           validBefore: Number(proof.authorization?.validBefore ?? 0),
         },
-      };
-      await s.sink([encodeStreamMessage(proofMsg)]);
+      } as InvokePaymentProof));
     };
 
     if (streamMode) {
-      const outerStream = stream;
-      const self = this;
-      // Return an async iterable of InvokeEvent messages
       async function* iterateEvents(): AsyncIterable<InvokeEvent> {
-        for await (const data of outerStream.source) {
+        for await (const data of stream.source) {
           const msg = decodeStreamMessage(
             data instanceof Uint8Array ? data : (data as { subarray?: () => Uint8Array }).subarray?.() ?? new Uint8Array(0),
           );
           if (!msg) continue;
           if (msg.type === 'invoke.payment_required') {
-            await handlePaymentRequired(msg as InvokePaymentRequired, outerStream);
-            continue; // keep waiting for accept/events
+            await handlePaymentRequired(msg as InvokePaymentRequired);
+            continue;
           }
           if (msg.type === 'invoke.event') yield msg;
-          if (msg.type === 'invoke.done' || msg.type === 'invoke.error') break;
-          if (msg.type === 'invoke.cancel') break;
+          if (msg.type === 'invoke.done' || msg.type === 'invoke.error') {
+            writer.end();
+            break;
+          }
+          if (msg.type === 'invoke.cancel') { writer.end(); break; }
         }
       }
       return iterateEvents();
@@ -752,20 +795,21 @@ export class NexusClient {
       const msg = decodeStreamMessage(raw);
       if (!msg) continue;
       if (msg.type === 'invoke.payment_required') {
-        await handlePaymentRequired(msg as InvokePaymentRequired, stream);
-        continue; // keep waiting for accept/events after payment
+        await handlePaymentRequired(msg as InvokePaymentRequired);
+        continue;
       }
       if (msg.type === 'invoke.event') events.push(msg);
-      if (msg.type === 'invoke.done') break;
+      if (msg.type === 'invoke.done') { writer.end(); break; }
       if (msg.type === 'invoke.error') {
+        writer.end();
         throw new Error(`invoke.error [${msg.code}]: ${msg.message}`);
       }
       if (msg.type === 'invoke.cancel') {
+        writer.end();
         throw new Error(`Invocation cancelled: ${msg.reason}`);
       }
     }
 
-    // Aggregate event data into a single result
     if (events.length === 1) return events[0].data;
     if (events.length > 1) return events.map(e => e.data);
     return null;
@@ -943,14 +987,8 @@ export class NexusClient {
     const shortId = remotePeerId.slice(0, 12);
     log.info(`Incoming invoke stream from ${shortId}...`);
 
-    // CRITICAL: stream.source is an AsyncIterable that can only be iterated ONCE.
-    // We get the iterator here and use it throughout the entire handler lifecycle.
-    // Previous bug: multiple `for await (... of stream.source)` blocks each created
-    // a new iterator, but the source was already consumed by the first one — causing
-    // silent hangs where the provider never processed incoming data.
+    // Single-use source iterator — read all messages through this
     const sourceIterator = stream.source[Symbol.asyncIterator]();
-
-    // Helper: read the next decoded message from the stream
     const readNext = async (): Promise<InvokeMessage | null> => {
       try {
         const { value, done } = await sourceIterator.next();
@@ -962,12 +1000,15 @@ export class NexusClient {
       }
     };
 
+    // Single pushable writer — all responses go through this
+    const writer = createStreamWriter(stream);
+
     try {
       // Phase 1: Read invoke.open
       let openMsg: InvokeOpen | null = null;
       while (true) {
         const msg = await readNext();
-        if (!msg) { stream.close?.(); return; }
+        if (!msg) { writer.end(); stream.close?.(); return; }
         if (msg.type === 'invoke.open') { openMsg = msg; break; }
       }
 
@@ -976,11 +1017,11 @@ export class NexusClient {
       // Trust check
       if (!this.trustPolicy.allowPeer(remotePeerId) ||
           !this.trustPolicy.allowCapability(remotePeerId, openMsg.capability)) {
-        await stream.sink([encodeStreamMessage({
+        writer.push(encodeStreamMessage({
           type: 'invoke.error', version: 1,
           requestId: openMsg.requestId, code: 'FORBIDDEN', message: 'Peer not allowed',
-        })]);
-        stream.close?.();
+        }));
+        writer.end();
         return;
       }
 
@@ -995,13 +1036,13 @@ export class NexusClient {
       const handler = this.capabilityHandlers.get(openMsg.capability);
       if (!handler) {
         log.warn(`Capability "${openMsg.capability}" not registered — have: [${this.getRegisteredCapabilities().join(', ')}]`);
-        await stream.sink([encodeStreamMessage({
+        writer.push(encodeStreamMessage({
           type: 'invoke.error', version: 1,
           requestId: openMsg.requestId,
           code: 'NOT_FOUND',
           message: `Capability "${openMsg.capability}" not registered`,
-        })]);
-        stream.close?.();
+        }));
+        writer.end();
         return;
       }
 
@@ -1010,7 +1051,7 @@ export class NexusClient {
       let paymentRecord: { amount: string; currency: string } | undefined;
 
       if (pricing) {
-        const paymentReq: InvokePaymentRequired = {
+        writer.push(encodeStreamMessage({
           type: 'invoke.payment_required', version: 1,
           requestId: openMsg.requestId,
           terms: {
@@ -1019,10 +1060,8 @@ export class NexusClient {
             description: pricing.description,
             validUntil: Date.now() + 300_000,
           },
-        };
-        await stream.sink([encodeStreamMessage(paymentReq)]);
+        } as InvokePaymentRequired));
 
-        // Wait for payment proof (using the same iterator)
         let proofReceived = false;
         const deadline = Date.now() + 30_000;
 
@@ -1063,12 +1102,12 @@ export class NexusClient {
               }, terms);
 
               if (!valid) {
-                await stream.sink([encodeStreamMessage({
+                writer.push(encodeStreamMessage({
                   type: 'invoke.error', version: 1,
                   requestId: openMsg.requestId,
                   code: 'PAYMENT_INVALID', message: 'Payment proof validation failed',
-                })]);
-                stream.close?.();
+                }));
+                writer.end();
                 return;
               }
 
@@ -1078,36 +1117,36 @@ export class NexusClient {
             break;
           }
 
-          if (msg.type === 'invoke.cancel') { stream.close?.(); return; }
+          if (msg.type === 'invoke.cancel') { writer.end(); return; }
         }
 
         if (!proofReceived) {
-          await stream.sink([encodeStreamMessage({
+          writer.push(encodeStreamMessage({
             type: 'invoke.error', version: 1,
             requestId: openMsg.requestId,
             code: 'PAYMENT_TIMEOUT', message: 'Payment proof not received within timeout',
-          })]);
-          stream.close?.();
+          }));
+          writer.end();
           return;
         }
       }
 
       // Phase 3: Build stream handle and dispatch to handler
-      // Uses the SAME sourceIterator — no new `for await` on stream.source
+      // The handle.write() uses the same pushable writer — never calls sink() again
       const dataListeners: Array<(msg: InvokeMessage) => void> = [];
       const handle: InvokeStreamHandle = {
         write: async (msg: InvokeMessage) => {
-          await stream.sink([encodeStreamMessage(msg)]);
+          writer.push(encodeStreamMessage(msg));
         },
         onData: (cb: (msg: InvokeMessage) => void) => {
           dataListeners.push(cb);
         },
         close: () => {
-          stream.close?.();
+          writer.end();
         },
       };
 
-      // Background reader — uses the same iterator, never creates a new one
+      // Background reader — same source iterator
       const startMs = Date.now();
       (async () => {
         try {
@@ -1141,6 +1180,7 @@ export class NexusClient {
 
     } catch (err) {
       log.debug(`Incoming invoke error: ${(err as Error).message}`);
+      writer.end();
     }
   }
 

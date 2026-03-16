@@ -195,9 +195,9 @@ export class NexusClient {
     });
     log.info(`Identity: ${this.identity.peerId}`);
 
-    // 2. NATS is disabled inside connect() due to WebSocket conflict with libp2p.
-    // The frontend connects to NATS directly in the browser (no conflict).
-    // Agents register via HTTP /api/v1/directory instead.
+    // 2. NATS announcement — connect AFTER libp2p starts (tested: no WS conflict
+    //    when NATS connects after libp2p is fully initialized).
+    //    This is the primary way the frontend dashboard sees agents in real-time.
 
     // 3. Resolve the cache path: explicit cachePath > dirname(keyStorePath) > undefined
     const cachePath =
@@ -295,10 +295,23 @@ export class NexusClient {
       log.debug(`DHT profile publish deferred: ${err.message}`);
     });
 
-    // NATS announce + timer (NATS was connected earlier, before libp2p)
-    if (this.natsDiscovery?.isConnected) {
-      await this.announceViaNats();
-      this.natsAnnounceTimer = setInterval(() => this.announceViaNats(), 60_000);
+    // NATS announce — connect now (after libp2p is fully started, no WS conflict)
+    if (this.config.enableNats !== false) {
+      try {
+        this.natsDiscovery = new NatsDiscovery({
+          enabled: true,
+          servers: this.config.natsServers ?? ['wss://demo.nats.io:8443'],
+          subjects: ['nexus.agents.discovery', 'nexus.agents.presence'],
+        });
+        const natsOk = await this.natsDiscovery.connect(2, 3000);
+        if (natsOk) {
+          await this.announceViaNats();
+          this.natsAnnounceTimer = setInterval(() => this.announceViaNats(), 30_000);
+          log.info('NATS discovery enabled — dashboard will see this agent');
+        }
+      } catch (err) {
+        log.debug(`NATS connection skipped: ${(err as Error).message}`);
+      }
     }
 
     // NKN fallback — opt-in
@@ -326,12 +339,8 @@ export class NexusClient {
     }
 
     // Register in the hub's persistent directory (one-time, not recurring)
+    // This is a fallback — NATS is the primary real-time discovery path
     this.registerInDirectory().catch(() => {});
-
-    // Agent visibility: register in the hub directory via HTTP
-    // This is the primary way the frontend sees agents (KV-backed, low-frequency)
-    // NATS is available for standalone scripts/tests but not inside NexusClient
-    // due to nats.ws/libp2p WebSocket conflict
   }
 
   async disconnect(): Promise<void> {

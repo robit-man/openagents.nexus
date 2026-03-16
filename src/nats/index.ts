@@ -28,6 +28,8 @@ export interface NatsAgentAnnouncement {
   rooms: string[];
   multiaddrs: string[];
   timestamp: number;
+  services?: string[];
+  capabilities?: string[];
 }
 
 /**

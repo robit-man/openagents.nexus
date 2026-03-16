@@ -427,6 +427,13 @@
     font-family: var(--font); font-size: 9px; outline: none;
   ">
   <div id="nodes-list" role="list"></div>
+  <label id="infra-toggle" style="
+    display:flex;align-items:center;gap:4px;padding:4px 10px;font-size:8px;color:#444;
+    cursor:pointer;user-select:none;border-top:1px solid rgba(255,255,255,0.04);flex-shrink:0;
+  ">
+    <input type="checkbox" id="show-infra" style="accent-color:#555;width:10px;height:10px">
+    show infrastructure
+  </label>
   <div style="padding:6px 10px;font-size:8px;color:#444;border-top:1px solid rgba(255,255,255,0.04);flex-shrink:0">
     <span id="install-box" style="cursor:pointer;color:#666" title="copy">npm i -g open-agents-ai</span>
     &nbsp;·&nbsp;
@@ -916,12 +923,16 @@ function renderPeerCards(bootstrapPeers) {
     }
   });
 
+  // Bootstrap cards are hidden by default — toggled via "show infrastructure"
+  const showInfra = document.getElementById('show-infra')?.checked ?? false;
+
   seen.forEach(({ hostname, transport, peerId }) => {
     const label = extractShortLabel(hostname);
     const shortId = peerId.slice(0, 8);
     const card    = document.createElement('div');
-    card.className = 'peer-card';
+    card.className = 'peer-card bootstrap-node';
     card.setAttribute('role', 'listitem');
+    if (!showInfra) card.style.display = 'none';
     card.innerHTML = `
       <div class="peer-name">
         <div class="peer-dot"></div>
@@ -1315,6 +1326,10 @@ function renderNatsAgentCard(ann) {
   const shortId = ann.peerId.slice(0, 8);
   const rooms = (ann.rooms || []).join(', ') || '';
 
+  const nknAddr = ann.nknAddress || '';
+  const capsStr = (ann.capabilities || []).join(', ');
+  const transport = nknAddr ? 'NKN' : 'P2P';
+
   card.innerHTML = `
     <div class="peer-name">
       <div class="peer-dot" style="background:#fff;box-shadow:0 0 4px #fff"></div>
@@ -1322,7 +1337,10 @@ function renderNatsAgentCard(ann) {
     </div>
     <div class="peer-meta">
       <div class="peer-meta-item">${shortId}...</div>
+      <div class="peer-meta-item">${transport}</div>
       ${rooms ? `<div class="peer-meta-item">${rooms}</div>` : ''}
+      ${nknAddr ? `<div class="peer-meta-item" style="grid-column:1/-1;font-size:7px;color:#555">${nknAddr}</div>` : ''}
+      ${capsStr ? `<div class="peer-meta-item" style="grid-column:1/-1;font-size:7px;color:#555">${capsStr}</div>` : ''}
     </div>
   `;
   nodesList.appendChild(card);
@@ -1383,9 +1401,27 @@ if (topCmd) topCmd.addEventListener('click', doCopy);
 // ─────────────────────────────────────────────
 document.getElementById('node-search').addEventListener('input', (e) => {
   const q = e.target.value.toLowerCase();
+  const showInfra = document.getElementById('show-infra')?.checked ?? false;
   document.querySelectorAll('.peer-card').forEach(card => {
     const text = card.textContent.toLowerCase();
-    card.style.display = text.includes(q) ? '' : 'none';
+    const isBootstrap = card.classList.contains('bootstrap-node');
+    if (isBootstrap && !showInfra) {
+      card.style.display = 'none';
+    } else {
+      card.style.display = text.includes(q) ? '' : 'none';
+    }
+  });
+});
+
+// Infrastructure toggle — show/hide bootstrap nodes
+document.getElementById('show-infra').addEventListener('change', (e) => {
+  const show = e.target.checked;
+  document.querySelectorAll('.peer-card.bootstrap-node').forEach(card => {
+    card.style.display = show ? '' : 'none';
+  });
+  // Also show/hide bootstrap-related dividers
+  document.querySelectorAll('.agent-divider').forEach(div => {
+    div.style.display = show ? '' : 'none';
   });
 });
 

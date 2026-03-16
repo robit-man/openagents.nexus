@@ -83,6 +83,35 @@ export interface InvokeCancel {
   reason: string;
 }
 
+export interface InvokePaymentRequired {
+  type: 'invoke.payment_required';
+  version: 1;
+  requestId: string;
+  terms: {
+    amount: string;
+    currency: string;
+    recipient: string;
+    description?: string;
+    validUntil?: number;
+  };
+}
+
+export interface InvokePaymentProof {
+  type: 'invoke.payment_proof';
+  version: 1;
+  requestId: string;
+  proof: {
+    from: string;
+    to: string;
+    amount: string;
+    currency: string;
+    signature: string;
+    nonce: string;
+    validAfter: number;
+    validBefore: number;
+  };
+}
+
 export type InvokeMessage =
   | InvokeOpen
   | InvokeChunk
@@ -90,7 +119,9 @@ export type InvokeMessage =
   | InvokeEvent
   | InvokeDone
   | InvokeError
-  | InvokeCancel;
+  | InvokeCancel
+  | InvokePaymentRequired
+  | InvokePaymentProof;
 
 // ---------------------------------------------------------------------------
 // Codec helpers

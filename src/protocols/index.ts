@@ -12,6 +12,7 @@ export { DM_PROTOCOL } from './dm.js';
 export { CHAT_SYNC_PROTOCOL } from './chat-sync.js';
 
 export * from './invoke.js';
+// InvokePaymentRequired and InvokePaymentProof are re-exported via the wildcard above
 export * from './handshake.js';
 export * from './dm.js';
 export * from './chat-sync.js';

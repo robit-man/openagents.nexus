@@ -75,4 +75,5 @@ export class RoomManager {
 }
 
 export { NexusRoom } from './room.js';
+export type { RoomMember } from './room.js';
 export { createChatMessage, createPresenceMessage, createMetaMessage } from './messages.js';

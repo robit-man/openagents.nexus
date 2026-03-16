@@ -26,6 +26,16 @@ import { createLogger } from '../logger.js';
 const log = createLogger('chat:room');
 
 const PRESENCE_INTERVAL_MS = 60_000;
+const STALE_TIMEOUT_MS = PRESENCE_INTERVAL_MS * 2; // 120s — 2x heartbeat
+
+export interface RoomMember {
+  peerId: string;
+  agentName: string;
+  agentType: string;
+  status: 'online' | 'idle' | 'busy' | 'offline';
+  capabilities: string[];
+  lastSeen: number;
+}
 
 export interface SendOptions {
   format?: ContentFormat;
@@ -37,6 +47,8 @@ type RoomEventMap = {
   message: NexusMessage;
   presence: NexusMessage;
   sync: { loaded: number; total: number };
+  'member:join': RoomMember;
+  'member:leave': RoomMember;
 };
 
 type RoomEventListener<K extends keyof RoomEventMap> = (value: RoomEventMap[K]) => void;
@@ -52,7 +64,9 @@ export class NexusRoom {
   private listeners = new Map<string, Set<(value: any) => void>>();
   private pubsubHandler: ((evt: any) => void) | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private staleEvictionTimer: ReturnType<typeof setInterval> | null = null;
   private joined = false;
+  private memberMap = new Map<string, RoomMember>();
 
   constructor(
     roomId: string,
@@ -122,6 +136,7 @@ export class NexusRoom {
           this.emit('message', msg);
         } else if (msg.type === 'presence') {
           this.emit('presence', msg);
+          this.trackMemberPresence(msg);
         }
       } catch {
         // Silently ignore malformed messages
@@ -136,6 +151,11 @@ export class NexusRoom {
     this.heartbeatInterval = setInterval(async () => {
       await this.publishPresence('online');
     }, PRESENCE_INTERVAL_MS);
+
+    // Start stale member eviction (check every 30s)
+    this.staleEvictionTimer = setInterval(() => {
+      this.evictStaleMembers();
+    }, 30_000);
 
     this.joined = true;
     log.info(`Joined room: ${this.roomId}`);
@@ -160,6 +180,12 @@ export class NexusRoom {
       this.heartbeatInterval = null;
     }
 
+    // Stop stale eviction
+    if (this.staleEvictionTimer !== null) {
+      clearInterval(this.staleEvictionTimer);
+      this.staleEvictionTimer = null;
+    }
+
     // Publish offline presence
     await this.publishPresence('offline');
 
@@ -177,5 +203,65 @@ export class NexusRoom {
   private async publishPresence(status: 'online' | 'idle' | 'busy' | 'offline'): Promise<void> {
     const msg = createPresenceMessage(this.roomId, this.peerId, status, this.agentInfo);
     await this.pubsub.publish(this.topic, encodeMessage(msg));
+  }
+
+  // --- Member tracking ---
+
+  private trackMemberPresence(msg: NexusMessage): void {
+    const payload = msg.payload as any;
+    if (!payload || !payload.status) return;
+
+    const peerId = msg.sender;
+    const existing = this.memberMap.get(peerId);
+
+    if (payload.status === 'offline') {
+      if (existing) {
+        this.memberMap.delete(peerId);
+        this.emit('member:leave', existing);
+      }
+      return;
+    }
+
+    const member: RoomMember = {
+      peerId,
+      agentName: payload.agentName ?? '',
+      agentType: payload.agentType ?? '',
+      status: payload.status,
+      capabilities: payload.capabilities ?? [],
+      lastSeen: msg.timestamp,
+    };
+
+    const isNew = !existing;
+    this.memberMap.set(peerId, member);
+
+    if (isNew) {
+      this.emit('member:join', member);
+    }
+  }
+
+  private evictStaleMembers(): void {
+    const cutoff = Date.now() - STALE_TIMEOUT_MS;
+    for (const [peerId, member] of this.memberMap) {
+      if (member.lastSeen < cutoff) {
+        this.memberMap.delete(peerId);
+        this.emit('member:leave', member);
+        log.debug(`Evicted stale member ${peerId.slice(0, 12)}... from ${this.roomId}`);
+      }
+    }
+  }
+
+  get members(): RoomMember[] {
+    return Array.from(this.memberMap.values());
+  }
+
+  getMember(peerId: string): RoomMember | undefined {
+    return this.memberMap.get(peerId);
+  }
+
+  findMemberByName(name: string): RoomMember | undefined {
+    for (const member of this.memberMap.values()) {
+      if (member.agentName === name) return member;
+    }
+    return undefined;
   }
 }

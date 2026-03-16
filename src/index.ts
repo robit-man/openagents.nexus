@@ -38,10 +38,17 @@ import {
   decodeStreamMessage,
   type InvokeOpen,
   type InvokeEvent,
+  type InvokeMessage,
+  type InvokeHandler,
+  type InvokeStreamHandle,
 } from './protocols/index.js';
 import { NatsDiscovery } from './nats/index.js';
 import type { NatsAgentAnnouncement } from './nats/index.js';
 import { NknFallback } from './nkn/index.js';
+import { DefaultTrustPolicy } from './trust/index.js';
+import type { TrustConfig } from './trust/index.js';
+import { MeteringEngine } from './metering/index.js';
+import type { UsageRecord } from './metering/index.js';
 
 // NexusRoom is re-exported below — import it here first so the named export
 // precedes the export * from './chat/index.js' re-export (NodeNext ESM guard).
@@ -94,6 +101,9 @@ export interface NexusClientOptions {
   // NKN fallback addressing (opt-in)
   enableNkn?: boolean;       // default false
   nknIdentifier?: string;    // NKN address prefix
+
+  // Trust policy configuration
+  trustPolicy?: TrustConfig;
 }
 
 export interface CreateRoomOptions {
@@ -113,6 +123,9 @@ type NexusEventMap = {
   'peer:connected': string;
   'peer:disconnected': string;
   'error': Error;
+  'message': { roomId: string; message: import('./protocol/types.js').NexusMessage };
+  'dm': { from: string; content: string; format: string; messageId: string };
+  'invoke': { from: string; capability: string; requestId: string };
 };
 
 type NexusEventListener<K extends keyof NexusEventMap> = (value: NexusEventMap[K]) => void;
@@ -134,12 +147,19 @@ export class NexusClient {
   private natsDiscovery: NatsDiscovery | null = null;
   private natsAnnounceTimer: ReturnType<typeof setInterval> | null = null;
   private nknFallback: NknFallback | null = null;
+  private capabilityHandlers = new Map<string, InvokeHandler>();
+  private _trustPolicy: DefaultTrustPolicy | null = null;
+  private _metering: MeteringEngine | null = null;
+  private invokeHandlerRegistered = false;
 
   constructor(options?: NexusClientOptions) {
     this.config = resolveConfig(options);
     this.storageManager = new StorageManager();
     if (options?.x402) {
       this._x402 = new X402PaymentRail(options.x402);
+    }
+    if (options?.trustPolicy) {
+      this._trustPolicy = new DefaultTrustPolicy(options.trustPolicy);
     }
   }
 
@@ -149,6 +169,22 @@ export class NexusClient {
       this._x402 = new X402PaymentRail();
     }
     return this._x402;
+  }
+
+  // Lazy-initialized metering engine
+  get metering(): MeteringEngine {
+    if (!this._metering) {
+      this._metering = new MeteringEngine();
+    }
+    return this._metering;
+  }
+
+  // Lazy-initialized trust policy
+  get trustPolicy(): DefaultTrustPolicy {
+    if (!this._trustPolicy) {
+      this._trustPolicy = new DefaultTrustPolicy();
+    }
+    return this._trustPolicy;
   }
 
   // --- Event emitter ---
@@ -323,6 +359,37 @@ export class NexusClient {
       await this.nknFallback.connect();
     }
 
+    // Register DM protocol handler for receiving direct messages
+    this.node.handle(STREAM_PROTOCOLS.DM, async ({ stream, connection }: any) => {
+      const remotePeerId = connection.remotePeer.toString();
+
+      // Trust check
+      if (!this.trustPolicy.allowPeer(remotePeerId)) {
+        log.debug(`DM blocked from ${remotePeerId.slice(0, 12)}...`);
+        stream.close?.();
+        return;
+      }
+
+      try {
+        for await (const data of stream.source) {
+          const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
+          const text = new TextDecoder().decode(raw).trim();
+          if (!text) continue;
+          const msg = JSON.parse(text);
+          if (msg.type === 'dm.message' && msg.content) {
+            this.emit('dm', {
+              from: remotePeerId,
+              content: msg.content,
+              format: msg.contentFormat ?? 'text/plain',
+              messageId: msg.messageId ?? '',
+            });
+          }
+        }
+      } catch {
+        // Stream read errors are expected when the sender closes
+      }
+    });
+
     this._isConnected = true;
     log.info('Connected to OpenAgents Nexus');
     log.info(
@@ -424,6 +491,7 @@ export class NexusClient {
       rooms: this.roomManager?.getJoinedRooms() ?? [],
       multiaddrs: this.node ? this.node.getMultiaddrs().map((a: any) => a.toString()) : [],
       timestamp: Date.now(),
+      capabilities: this.getRegisteredCapabilities(),
     });
   }
 
@@ -453,6 +521,12 @@ export class NexusClient {
   async joinRoom(roomId: string): Promise<NexusRoom> {
     this.ensureConnected();
     const room = await this.roomManager!.joinRoom(roomId);
+
+    // Forward room messages to client-level 'message' event
+    room.on('message', (message) => {
+      this.emit('message', { roomId, message });
+    });
+
     // Re-announce via NATS so the frontend sees updated room membership
     this.announceViaNats();
     return room;
@@ -620,6 +694,165 @@ export class NexusClient {
     );
     await stream.sink([dmMsg]);
     stream.close?.();
+  }
+
+  // --- Capability registration (incoming invocation handling) ---
+
+  /**
+   * Register a named capability handler. When a remote peer invokes this
+   * capability via the /nexus/invoke/1.1.0 protocol, the handler is called.
+   *
+   * On first registration, the libp2p protocol handler is set up.
+   */
+  registerCapability(name: string, handler: InvokeHandler): void {
+    this.capabilityHandlers.set(name, handler);
+
+    // Register the libp2p protocol handler on first use
+    if (!this.invokeHandlerRegistered && this.node) {
+      this.node.handle(STREAM_PROTOCOLS.INVOKE, async ({ stream, connection }: any) => {
+        await this.handleIncomingInvoke(stream, connection);
+      });
+      this.invokeHandlerRegistered = true;
+    }
+
+    log.info(`Registered capability: ${name}`);
+  }
+
+  /**
+   * Remove a previously registered capability handler.
+   */
+  unregisterCapability(name: string): void {
+    this.capabilityHandlers.delete(name);
+    log.info(`Unregistered capability: ${name}`);
+  }
+
+  /**
+   * List all registered capability names.
+   */
+  getRegisteredCapabilities(): string[] {
+    return Array.from(this.capabilityHandlers.keys());
+  }
+
+  private async handleIncomingInvoke(stream: any, connection: any): Promise<void> {
+    const remotePeerId = connection.remotePeer.toString();
+
+    try {
+      // Read the first message — must be invoke.open
+      let openMsg: InvokeOpen | null = null;
+      for await (const data of stream.source) {
+        const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
+        const msg = decodeStreamMessage(raw);
+        if (!msg) continue;
+        if (msg.type === 'invoke.open') {
+          openMsg = msg;
+          break;
+        }
+      }
+
+      if (!openMsg) {
+        stream.close?.();
+        return;
+      }
+
+      // Trust check
+      if (!this.trustPolicy.allowPeer(remotePeerId) ||
+          !this.trustPolicy.allowCapability(remotePeerId, openMsg.capability)) {
+        await stream.sink([encodeStreamMessage({
+          type: 'invoke.error',
+          version: 1,
+          requestId: openMsg.requestId,
+          code: 'FORBIDDEN',
+          message: 'Peer not allowed',
+        })]);
+        stream.close?.();
+        return;
+      }
+
+      // Emit invoke event
+      this.emit('invoke', {
+        from: remotePeerId,
+        capability: openMsg.capability,
+        requestId: openMsg.requestId,
+      });
+
+      // Find handler
+      const handler = this.capabilityHandlers.get(openMsg.capability);
+      if (!handler) {
+        await stream.sink([encodeStreamMessage({
+          type: 'invoke.error',
+          version: 1,
+          requestId: openMsg.requestId,
+          code: 'NOT_FOUND',
+          message: `Capability "${openMsg.capability}" not registered`,
+        })]);
+        stream.close?.();
+        return;
+      }
+
+      // Build stream handle for the handler
+      const dataListeners: Array<(msg: InvokeMessage) => void> = [];
+      const handle: InvokeStreamHandle = {
+        write: async (msg: InvokeMessage) => {
+          await stream.sink([encodeStreamMessage(msg)]);
+        },
+        onData: (cb: (msg: InvokeMessage) => void) => {
+          dataListeners.push(cb);
+        },
+        close: () => {
+          stream.close?.();
+        },
+      };
+
+      // Start reading remaining stream data in background
+      const startMs = Date.now();
+      (async () => {
+        try {
+          for await (const data of stream.source) {
+            const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
+            const msg = decodeStreamMessage(raw);
+            if (msg) dataListeners.forEach(cb => cb(msg));
+          }
+        } catch {
+          // Stream closed
+        }
+      })();
+
+      // Dispatch to handler
+      await handler(openMsg, handle);
+
+      // Record usage
+      const durationMs = Date.now() - startMs;
+      await this.metering.record({
+        id: openMsg.requestId,
+        timestamp: Date.now(),
+        peerId: remotePeerId,
+        service: openMsg.capability,
+        capability: openMsg.capability,
+        direction: 'inbound',
+        inputBytes: 0,
+        outputBytes: 0,
+        durationMs,
+      });
+
+    } catch (err) {
+      log.debug(`Incoming invoke error: ${(err as Error).message}`);
+    }
+  }
+
+  // --- Blocking ---
+
+  /**
+   * Block a peer from invoking capabilities and sending DMs.
+   */
+  blockPeer(peerId: string): void {
+    this.trustPolicy.addToDenylist(peerId);
+  }
+
+  /**
+   * Remove a peer from the block list.
+   */
+  unblockPeer(peerId: string): void {
+    this.trustPolicy.removeFromDenylist(peerId);
   }
 
   // --- Storage ---
@@ -806,8 +1039,11 @@ export type {
   InvokeDone,
   InvokeError,
   InvokeCancel,
+  InvokePaymentRequired,
+  InvokePaymentProof,
   InvokeMessage,
   InvokeHandler,
+  InvokeStreamHandle,
   HandshakeInit,
   HandshakeAck,
   DmMessage,
@@ -859,3 +1095,11 @@ export type { NatsDiscoveryConfig, NatsAgentAnnouncement } from './nats/index.js
 // NKN fallback addressing
 export { NknFallback, DEFAULT_NKN_CONFIG } from './nkn/index.js';
 export type { NknConfig, NknAddressInfo } from './nkn/index.js';
+
+// Room member tracking
+export type { RoomMember } from './chat/index.js';
+
+// Metering engine
+export { MeteringEngine } from './metering/index.js';
+export { createFileAuditHook } from './metering/file-logger.js';
+export type { UsageRecord, PeerUsageSummary, UsageFilter, MeteringHook } from './metering/index.js';

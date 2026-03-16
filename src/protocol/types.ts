@@ -32,7 +32,7 @@ export type AgentRole = 'light' | 'full' | 'storage';
 export type RoomType = 'persistent' | 'ephemeral';
 
 // Room access
-export type RoomAccess = 'public';
+export type RoomAccess = 'public' | 'token-gated';
 
 // Content formats
 export type ContentFormat = 'text/plain' | 'text/markdown' | 'application/json';

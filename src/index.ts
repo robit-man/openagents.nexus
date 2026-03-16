@@ -374,6 +374,13 @@ export class NexusClient {
       await this.nknFallback.connect();
     }
 
+    // Register invoke protocol handler — MUST be in connect(), not registerCapability(),
+    // because registerCapability() may be called before connect() when this.node is null.
+    this.node.handle(STREAM_PROTOCOLS.INVOKE, async ({ stream, connection }: any) => {
+      await this.handleIncomingInvoke(stream, connection);
+    });
+    this.invokeHandlerRegistered = true;
+
     // Register DM protocol handler for receiving direct messages
     this.node.handle(STREAM_PROTOCOLS.DM, async ({ stream, connection }: any) => {
       const remotePeerId = connection.remotePeer.toString();
@@ -908,13 +915,9 @@ export class NexusClient {
       this.capabilityPricing.delete(name);
     }
 
-    // Register the libp2p protocol handler on first use
-    if (!this.invokeHandlerRegistered && this.node) {
-      this.node.handle(STREAM_PROTOCOLS.INVOKE, async ({ stream, connection }: any) => {
-        await this.handleIncomingInvoke(stream, connection);
-      });
-      this.invokeHandlerRegistered = true;
-    }
+    // Protocol handler is registered in connect() — registerCapability() just populates the map.
+    // If called after connect(), the handler is already listening. If called before connect(),
+    // connect() will register it when the node is ready.
 
     log.info(`Registered capability: ${name}${options?.pricing ? ` (${options.pricing.amount} ${options.pricing.currency})` : ''}`);
   }
@@ -937,34 +940,45 @@ export class NexusClient {
 
   private async handleIncomingInvoke(stream: any, connection: any): Promise<void> {
     const remotePeerId = connection.remotePeer.toString();
+    const shortId = remotePeerId.slice(0, 12);
+    log.info(`Incoming invoke stream from ${shortId}...`);
+
+    // CRITICAL: stream.source is an AsyncIterable that can only be iterated ONCE.
+    // We get the iterator here and use it throughout the entire handler lifecycle.
+    // Previous bug: multiple `for await (... of stream.source)` blocks each created
+    // a new iterator, but the source was already consumed by the first one — causing
+    // silent hangs where the provider never processed incoming data.
+    const sourceIterator = stream.source[Symbol.asyncIterator]();
+
+    // Helper: read the next decoded message from the stream
+    const readNext = async (): Promise<InvokeMessage | null> => {
+      try {
+        const { value, done } = await sourceIterator.next();
+        if (done) return null;
+        const raw = value instanceof Uint8Array ? value : new Uint8Array((value as any).buffer ?? []);
+        return decodeStreamMessage(raw);
+      } catch {
+        return null;
+      }
+    };
 
     try {
-      // Read the first message — must be invoke.open
+      // Phase 1: Read invoke.open
       let openMsg: InvokeOpen | null = null;
-      for await (const data of stream.source) {
-        const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
-        const msg = decodeStreamMessage(raw);
-        if (!msg) continue;
-        if (msg.type === 'invoke.open') {
-          openMsg = msg;
-          break;
-        }
+      while (true) {
+        const msg = await readNext();
+        if (!msg) { stream.close?.(); return; }
+        if (msg.type === 'invoke.open') { openMsg = msg; break; }
       }
 
-      if (!openMsg) {
-        stream.close?.();
-        return;
-      }
+      log.info(`Invoke ${openMsg.capability} from ${shortId}... (request ${openMsg.requestId.slice(0, 8)})`);
 
       // Trust check
       if (!this.trustPolicy.allowPeer(remotePeerId) ||
           !this.trustPolicy.allowCapability(remotePeerId, openMsg.capability)) {
         await stream.sink([encodeStreamMessage({
-          type: 'invoke.error',
-          version: 1,
-          requestId: openMsg.requestId,
-          code: 'FORBIDDEN',
-          message: 'Peer not allowed',
+          type: 'invoke.error', version: 1,
+          requestId: openMsg.requestId, code: 'FORBIDDEN', message: 'Peer not allowed',
         })]);
         stream.close?.();
         return;
@@ -980,9 +994,9 @@ export class NexusClient {
       // Find handler
       const handler = this.capabilityHandlers.get(openMsg.capability);
       if (!handler) {
+        log.warn(`Capability "${openMsg.capability}" not registered — have: [${this.getRegisteredCapabilities().join(', ')}]`);
         await stream.sink([encodeStreamMessage({
-          type: 'invoke.error',
-          version: 1,
+          type: 'invoke.error', version: 1,
           requestId: openMsg.requestId,
           code: 'NOT_FOUND',
           message: `Capability "${openMsg.capability}" not registered`,
@@ -991,19 +1005,16 @@ export class NexusClient {
         return;
       }
 
-      // --- x402 payment gate ---
+      // Phase 2: x402 payment gate (if pricing configured)
       const pricing = this.capabilityPricing.get(openMsg.capability);
       let paymentRecord: { amount: string; currency: string } | undefined;
 
       if (pricing) {
-        // Send invoke.payment_required with terms
         const paymentReq: InvokePaymentRequired = {
-          type: 'invoke.payment_required',
-          version: 1,
+          type: 'invoke.payment_required', version: 1,
           requestId: openMsg.requestId,
           terms: {
-            amount: pricing.amount,
-            currency: pricing.currency,
+            amount: pricing.amount, currency: pricing.currency,
             recipient: this._x402?.walletAddress ?? '',
             description: pricing.description,
             validUntil: Date.now() + 300_000,
@@ -1011,105 +1022,78 @@ export class NexusClient {
         };
         await stream.sink([encodeStreamMessage(paymentReq)]);
 
-        // Wait for invoke.payment_proof from consumer
+        // Wait for payment proof (using the same iterator)
         let proofReceived = false;
-        const proofTimeout = setTimeout(() => {
-          if (!proofReceived) {
-            stream.sink([encodeStreamMessage({
-              type: 'invoke.error',
-              version: 1,
-              requestId: openMsg.requestId,
-              code: 'PAYMENT_TIMEOUT',
-              message: 'Payment proof not received within timeout',
-            })]).catch(() => {});
-            stream.close?.();
-          }
-        }, 30_000);
+        const deadline = Date.now() + 30_000;
 
-        try {
-          for await (const data of stream.source) {
-            const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
-            const msg = decodeStreamMessage(raw);
-            if (!msg) continue;
-            if (msg.type === 'invoke.payment_proof') {
-              proofReceived = true;
-              clearTimeout(proofTimeout);
+        while (Date.now() < deadline) {
+          const msg = await readNext();
+          if (!msg) break;
 
-              const proof = (msg as InvokePaymentProof).proof;
+          if (msg.type === 'invoke.payment_proof') {
+            proofReceived = true;
+            const proof = (msg as InvokePaymentProof).proof;
 
-              // For $0 free tier — skip validation, just proceed
-              if (pricing.amount === '0') {
-                log.info(`Free-tier invocation of ${openMsg.capability} from ${remotePeerId.slice(0, 12)}...`);
-                paymentRecord = { amount: '0', currency: pricing.currency };
-                break;
-              }
-
-              // Validate via x402
-              if (this._x402) {
-                const terms: PaymentTerms = {
-                  amount: pricing.amount,
-                  currency: pricing.currency,
-                  network: 'base',
-                  recipient: this._x402.walletAddress ?? '',
-                  description: pricing.description ?? '',
-                  expiresAt: Date.now() + 300_000,
-                  requestId: openMsg.requestId,
-                };
-
-                const valid = await this._x402.validatePayment({
-                  signature: proof.signature,
-                  payment: {
-                    requestId: openMsg.requestId,
-                    amount: proof.amount,
-                    currency: proof.currency,
-                    network: 'base',
-                    recipient: proof.to,
-                    payer: proof.from,
-                    timestamp: Date.now(),
-                  },
-                  authorization: {
-                    from: proof.from,
-                    to: proof.to,
-                    value: proof.amount,
-                    validAfter: String(proof.validAfter),
-                    validBefore: String(proof.validBefore),
-                    nonce: proof.nonce,
-                  },
-                }, terms);
-
-                if (!valid) {
-                  await stream.sink([encodeStreamMessage({
-                    type: 'invoke.error',
-                    version: 1,
-                    requestId: openMsg.requestId,
-                    code: 'PAYMENT_INVALID',
-                    message: 'Payment proof validation failed',
-                  })]);
-                  stream.close?.();
-                  return;
-                }
-
-                paymentRecord = { amount: proof.amount, currency: proof.currency };
-                log.info(`Payment validated for ${openMsg.capability}: ${proof.amount} ${proof.currency}`);
-              }
+            if (pricing.amount === '0') {
+              log.info(`Free-tier invocation of ${openMsg.capability} from ${shortId}...`);
+              paymentRecord = { amount: '0', currency: pricing.currency };
               break;
             }
-            if (msg.type === 'invoke.cancel') {
-              clearTimeout(proofTimeout);
-              stream.close?.();
-              return;
+
+            if (this._x402) {
+              const terms: PaymentTerms = {
+                amount: pricing.amount, currency: pricing.currency,
+                network: 'base', recipient: this._x402.walletAddress ?? '',
+                description: pricing.description ?? '',
+                expiresAt: Date.now() + 300_000, requestId: openMsg.requestId,
+              };
+
+              const valid = await this._x402.validatePayment({
+                signature: proof.signature,
+                payment: {
+                  requestId: openMsg.requestId, amount: proof.amount,
+                  currency: proof.currency, network: 'base',
+                  recipient: proof.to, payer: proof.from, timestamp: Date.now(),
+                },
+                authorization: {
+                  from: proof.from, to: proof.to, value: proof.amount,
+                  validAfter: String(proof.validAfter),
+                  validBefore: String(proof.validBefore), nonce: proof.nonce,
+                },
+              }, terms);
+
+              if (!valid) {
+                await stream.sink([encodeStreamMessage({
+                  type: 'invoke.error', version: 1,
+                  requestId: openMsg.requestId,
+                  code: 'PAYMENT_INVALID', message: 'Payment proof validation failed',
+                })]);
+                stream.close?.();
+                return;
+              }
+
+              paymentRecord = { amount: proof.amount, currency: proof.currency };
+              log.info(`Payment validated for ${openMsg.capability}: ${proof.amount} ${proof.currency}`);
             }
+            break;
           }
-        } catch {
-          clearTimeout(proofTimeout);
+
+          if (msg.type === 'invoke.cancel') { stream.close?.(); return; }
+        }
+
+        if (!proofReceived) {
+          await stream.sink([encodeStreamMessage({
+            type: 'invoke.error', version: 1,
+            requestId: openMsg.requestId,
+            code: 'PAYMENT_TIMEOUT', message: 'Payment proof not received within timeout',
+          })]);
           stream.close?.();
           return;
         }
-
-        if (!proofReceived) return;
       }
 
-      // Build stream handle for the handler
+      // Phase 3: Build stream handle and dispatch to handler
+      // Uses the SAME sourceIterator — no new `for await` on stream.source
       const dataListeners: Array<(msg: InvokeMessage) => void> = [];
       const handle: InvokeStreamHandle = {
         write: async (msg: InvokeMessage) => {
@@ -1123,14 +1107,14 @@ export class NexusClient {
         },
       };
 
-      // Start reading remaining stream data in background
+      // Background reader — uses the same iterator, never creates a new one
       const startMs = Date.now();
       (async () => {
         try {
-          for await (const data of stream.source) {
-            const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
-            const msg = decodeStreamMessage(raw);
-            if (msg) dataListeners.forEach(cb => cb(msg));
+          while (true) {
+            const msg = await readNext();
+            if (!msg) break;
+            dataListeners.forEach(cb => cb(msg));
           }
         } catch {
           // Stream closed

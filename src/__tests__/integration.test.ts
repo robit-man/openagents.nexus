@@ -149,11 +149,13 @@ describe('Integration: peer events', () => {
 
     try {
       await agentA.connect();
-      await agentB.connect();
 
-      // Collect peer:connected events on Agent A
+      // Collect peer:connected events on Agent A BEFORE B connects
+      // (B may discover A via mDNS during connect, triggering peer:connected immediately)
       const connectedPeers: string[] = [];
       agentA.on('peer:connected', (id) => connectedPeers.push(id));
+
+      await agentB.connect();
 
       // Dial A from B using the underlying libp2p node
       const nodeA = agentA.network.node;

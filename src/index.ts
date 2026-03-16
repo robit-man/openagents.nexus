@@ -52,49 +52,55 @@ import { DefaultTrustPolicy } from './trust/index.js';
 import type { TrustConfig } from './trust/index.js';
 import { MeteringEngine } from './metering/index.js';
 import type { UsageRecord } from './metering/index.js';
+// peerIdFromString imported dynamically in dialPeerProtocol to avoid startup side effects
+// import { peerIdFromString } from '@libp2p/peer-id';
 
 // ---------------------------------------------------------------------------
-// Pushable stream writer — wraps a libp2p stream.sink() so we can write
-// multiple messages without half-closing. libp2p's sink() consumes an
-// iterable in a single call and then closes the write side. This adapter
-// creates a long-lived async generator that stays open until end() is called.
+// libp2p v3 stream helpers
+//
+// v3 streams use:
+//   stream.send(data: Uint8Array)  — write (NOT .sink())
+//   stream[Symbol.asyncIterator]   — read (NOT .source)
+//   stream.close()                 — close
+//
+// The handler signature is (stream, connection) not ({ stream, connection })
 // ---------------------------------------------------------------------------
 
-interface StreamWriter {
-  push(data: Uint8Array): void;
-  end(): void;
+function streamSend(stream: any, msg: InvokeMessage): void {
+  const data = encodeStreamMessage(msg);
+  // libp2p v3 uses .send(), v2 used .sink(). Support both.
+  if (typeof stream.send === 'function') {
+    stream.send(data);
+  } else if (typeof stream.sink === 'function') {
+    // Legacy v2 fallback — single message
+    stream.sink([data]).catch(() => {});
+  }
 }
 
-function createStreamWriter(stream: any): StreamWriter {
-  const queue: Uint8Array[] = [];
-  let resolve: (() => void) | null = null;
-  let ended = false;
-
-  async function* generate(): AsyncGenerator<Uint8Array> {
-    while (true) {
-      if (queue.length > 0) {
-        yield queue.shift()!;
-      } else if (ended) {
-        return;
-      } else {
-        await new Promise<void>(r => { resolve = r; });
-      }
-    }
+function streamClose(stream: any): void {
+  if (typeof stream.close === 'function') {
+    stream.close().catch?.(() => {});
   }
+}
 
-  // Start sinking in background — this single call keeps the write side open
-  stream.sink(generate()).catch(() => {});
+async function* streamReader(stream: any): AsyncGenerator<InvokeMessage | null> {
+  // libp2p v3: stream itself is AsyncIterable<Uint8Array | Uint8ArrayList>
+  // libp2p v2: stream.source is the AsyncIterable
+  const iterable = stream[Symbol.asyncIterator] ? stream : stream.source;
+  if (!iterable) return;
 
-  return {
-    push(data: Uint8Array) {
-      queue.push(data);
-      if (resolve) { const r = resolve; resolve = null; r(); }
-    },
-    end() {
-      ended = true;
-      if (resolve) { const r = resolve; resolve = null; r(); }
-    },
-  };
+  try {
+    for await (const rawData of iterable) {
+      // Handle both Uint8Array and Uint8ArrayList
+      const bytes = rawData instanceof Uint8Array
+        ? rawData
+        : (typeof rawData.subarray === 'function' ? rawData.subarray() : new Uint8Array(rawData.buffer ?? []));
+      const msg = decodeStreamMessage(bytes);
+      if (msg) yield msg;
+    }
+  } catch {
+    // Stream closed or reset — normal
+  }
 }
 
 // NexusRoom is re-exported below — import it here first so the named export
@@ -418,46 +424,11 @@ export class NexusClient {
       await this.nknFallback.connect();
     }
 
-    // Register invoke protocol handler — MUST be in connect(), not registerCapability(),
-    // because registerCapability() may be called before connect() when this.node is null.
-    this.node.handle(STREAM_PROTOCOLS.INVOKE, async ({ stream, connection }: any) => {
-      await this.handleIncomingInvoke(stream, connection);
-    });
-    this.invokeHandlerRegistered = true;
-
-    // Register DM protocol handler for receiving direct messages
-    this.node.handle(STREAM_PROTOCOLS.DM, async ({ stream, connection }: any) => {
-      const remotePeerId = connection.remotePeer.toString();
-
-      // Trust check
-      if (!this.trustPolicy.allowPeer(remotePeerId)) {
-        log.debug(`DM blocked from ${remotePeerId.slice(0, 12)}...`);
-        stream.close?.();
-        return;
-      }
-
-      try {
-        for await (const data of stream.source) {
-          const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
-          const text = new TextDecoder().decode(raw).trim();
-          if (!text) continue;
-          const msg = JSON.parse(text);
-          if (msg.type === 'dm.message' && msg.content) {
-            this.emit('dm', {
-              from: remotePeerId,
-              content: msg.content,
-              format: msg.contentFormat ?? 'text/plain',
-              messageId: msg.messageId ?? '',
-            });
-          }
-        }
-      } catch {
-        // Stream read errors are expected when the sender closes
-      }
-    });
-
     this._isConnected = true;
     log.info('Connected to OpenAgents Nexus');
+
+    // Protocol handlers registered lazily — see registerProtocolHandlers()
+    this.registerProtocolHandlers();
     log.info(
       `Listening on: ${this.node
         .getMultiaddrs()
@@ -684,44 +655,29 @@ export class NexusClient {
 
     const stream = await this.dialPeerProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
 
-    // CRITICAL: libp2p streams allow only ONE sink() call. After that the write
-    // side is half-closed. We use a pushable writer so we can send multiple
-    // messages (open, chunk, payment proof) through a single sink() call.
-    const writer = createStreamWriter(stream);
-
-    // Send invoke.open + invoke.chunk in sequence through the single writer
-    writer.push(encodeStreamMessage({
-      type: 'invoke.open',
-      version: 1,
-      requestId,
-      capability,
+    // Send invoke.open + invoke.chunk via stream.send() (libp2p v3 API)
+    streamSend(stream, {
+      type: 'invoke.open', version: 1, requestId, capability,
       inputFormat: 'application/json',
       outputMode: streamMode ? 'stream' : 'unary',
-      maxDurationMs,
-      maxInputBytes: 65_536,
-      maxOutputBytes: 1_048_576,
-    } as InvokeOpen));
+      maxDurationMs, maxInputBytes: 65_536, maxOutputBytes: 1_048_576,
+    } as InvokeOpen);
 
-    writer.push(encodeStreamMessage({
-      type: 'invoke.chunk',
-      version: 1,
-      requestId,
-      seq: 0,
-      isFinalInput: true,
-      data: input,
-    }));
+    streamSend(stream, {
+      type: 'invoke.chunk', version: 1, requestId,
+      seq: 0, isFinalInput: true, data: input,
+    });
 
     // Helper: handle invoke.payment_required by auto-signing and sending proof
     const handlePaymentRequired = async (msg: InvokePaymentRequired): Promise<void> => {
       if (!this._x402?.walletAddress) {
-        throw new Error('Provider requires payment but x402 wallet is not initialized. Call nexus.x402.initWallet() first.');
+        throw new Error('Provider requires payment but x402 wallet is not initialized.');
       }
 
       const terms: PaymentTerms = {
         amount: msg.terms.amount,
         currency: (msg.terms.currency as PaymentTerms['currency']) || 'USDC',
-        network: 'base',
-        recipient: msg.terms.recipient,
+        network: 'base', recipient: msg.terms.recipient,
         description: msg.terms.description ?? '',
         expiresAt: msg.terms.validUntil ?? (Date.now() + 300_000),
         requestId: msg.requestId,
@@ -730,83 +686,64 @@ export class NexusClient {
       log.info(`Payment required for ${capability}: ${terms.amount} ${terms.currency}`);
 
       if (terms.amount === '0') {
-        writer.push(encodeStreamMessage({
-          type: 'invoke.payment_proof',
-          version: 1,
-          requestId,
+        streamSend(stream, {
+          type: 'invoke.payment_proof', version: 1, requestId,
           proof: {
-            from: this._x402.walletAddress!,
-            to: terms.recipient,
-            amount: '0',
-            currency: terms.currency,
-            signature: '0x',
-            nonce: '0x',
-            validAfter: 0,
-            validBefore: 0,
+            from: this._x402.walletAddress!, to: terms.recipient,
+            amount: '0', currency: terms.currency,
+            signature: '0x', nonce: '0x', validAfter: 0, validBefore: 0,
           },
-        } as InvokePaymentProof));
+        } as InvokePaymentProof);
         return;
       }
 
       const proof = await this._x402.signPayment(terms);
-      writer.push(encodeStreamMessage({
-        type: 'invoke.payment_proof',
-        version: 1,
-        requestId,
+      streamSend(stream, {
+        type: 'invoke.payment_proof', version: 1, requestId,
         proof: {
           from: proof.authorization?.from ?? proof.payment.payer,
           to: proof.authorization?.to ?? proof.payment.recipient,
-          amount: proof.payment.amount,
-          currency: proof.payment.currency,
-          signature: proof.signature,
-          nonce: proof.authorization?.nonce ?? '',
+          amount: proof.payment.amount, currency: proof.payment.currency,
+          signature: proof.signature, nonce: proof.authorization?.nonce ?? '',
           validAfter: Number(proof.authorization?.validAfter ?? 0),
           validBefore: Number(proof.authorization?.validBefore ?? 0),
         },
-      } as InvokePaymentProof));
+      } as InvokePaymentProof);
     };
 
+    // Read responses via streamReader (works with both v2 and v3 streams)
     if (streamMode) {
       async function* iterateEvents(): AsyncIterable<InvokeEvent> {
-        for await (const data of stream.source) {
-          const msg = decodeStreamMessage(
-            data instanceof Uint8Array ? data : (data as { subarray?: () => Uint8Array }).subarray?.() ?? new Uint8Array(0),
-          );
+        for await (const msg of streamReader(stream)) {
           if (!msg) continue;
           if (msg.type === 'invoke.payment_required') {
             await handlePaymentRequired(msg as InvokePaymentRequired);
             continue;
           }
-          if (msg.type === 'invoke.event') yield msg;
-          if (msg.type === 'invoke.done' || msg.type === 'invoke.error') {
-            writer.end();
-            break;
-          }
-          if (msg.type === 'invoke.cancel') { writer.end(); break; }
+          if (msg.type === 'invoke.event') yield msg as InvokeEvent;
+          if (msg.type === 'invoke.done' || msg.type === 'invoke.error') { streamClose(stream); break; }
+          if (msg.type === 'invoke.cancel') { streamClose(stream); break; }
         }
       }
       return iterateEvents();
     }
 
-    // Unary mode: collect all events and return aggregated output
     const events: InvokeEvent[] = [];
-    for await (const data of stream.source) {
-      const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
-      const msg = decodeStreamMessage(raw);
+    for await (const msg of streamReader(stream)) {
       if (!msg) continue;
       if (msg.type === 'invoke.payment_required') {
         await handlePaymentRequired(msg as InvokePaymentRequired);
         continue;
       }
-      if (msg.type === 'invoke.event') events.push(msg);
-      if (msg.type === 'invoke.done') { writer.end(); break; }
+      if (msg.type === 'invoke.event') events.push(msg as InvokeEvent);
+      if (msg.type === 'invoke.done') { streamClose(stream); break; }
       if (msg.type === 'invoke.error') {
-        writer.end();
-        throw new Error(`invoke.error [${msg.code}]: ${msg.message}`);
+        streamClose(stream);
+        throw new Error(`invoke.error [${(msg as any).code}]: ${(msg as any).message}`);
       }
       if (msg.type === 'invoke.cancel') {
-        writer.end();
-        throw new Error(`Invocation cancelled: ${msg.reason}`);
+        streamClose(stream);
+        throw new Error(`Invocation cancelled: ${(msg as any).reason}`);
       }
     }
 
@@ -826,8 +763,56 @@ export class NexusClient {
     const dmMsg = new TextEncoder().encode(
       JSON.stringify({ type: 'dm.message', version: 1, messageId: uuidv7(), contentFormat: format, content }) + '\n',
     );
-    await stream.sink([dmMsg]);
-    stream.close?.();
+    // v3: stream.send(), v2: stream.sink()
+    if (typeof stream.send === 'function') {
+      stream.send(dmMsg);
+    } else if (typeof stream.sink === 'function') {
+      await stream.sink([dmMsg]);
+    }
+    streamClose(stream);
+  }
+
+  /**
+   * Register protocol handlers for INVOKE and DM.
+   * Called once during connect(). Safe to call multiple times — idempotent.
+   */
+  private registerProtocolHandlers(): void {
+    if (!this.node || this.invokeHandlerRegistered) return;
+
+    this.node.handle(STREAM_PROTOCOLS.INVOKE, (stream: any, connection: any) => {
+      this.handleIncomingInvoke(stream, connection).catch((err: Error) => {
+        log.debug(`Invoke handler error: ${err.message}`);
+      });
+    }).catch(() => {});
+    this.invokeHandlerRegistered = true;
+
+    this.node.handle(STREAM_PROTOCOLS.DM, (stream: any, connection: any) => {
+      const remotePeerId = connection.remotePeer.toString();
+      if (!this.trustPolicy.allowPeer(remotePeerId)) {
+        streamClose(stream);
+        return;
+      }
+      (async () => { try {
+        const iterable = stream[Symbol.asyncIterator] ? stream : stream.source;
+        if (!iterable) return;
+        for await (const data of iterable) {
+          const raw = data instanceof Uint8Array
+            ? data
+            : (typeof data.subarray === 'function' ? data.subarray() : new Uint8Array(data.buffer ?? []));
+          const text = new TextDecoder().decode(raw).trim();
+          if (!text) continue;
+          const msg = JSON.parse(text);
+          if (msg.type === 'dm.message' && msg.content) {
+            this.emit('dm', {
+              from: remotePeerId,
+              content: msg.content,
+              format: msg.contentFormat ?? 'text/plain',
+              messageId: msg.messageId ?? '',
+            });
+          }
+        }
+      } catch {} })().catch(() => {});
+    }).catch(() => {});
   }
 
   // --- Peer dialing helper ---
@@ -842,35 +827,40 @@ export class NexusClient {
    * 3. DHT profile lookup
    */
   private async dialPeerProtocol(peerId: string, protocol: string): Promise<any> {
-    const DIAL_TIMEOUT = 10_000; // 10 seconds per attempt — fail fast, don't hang
+    const DIAL_TIMEOUT = 10_000;
     const shortId = peerId.slice(0, 12);
 
-    // First try direct dial — works when libp2p knows the peer via mDNS/DHT/pubsub
+    // CRITICAL: libp2p v3 requires a PeerId object, not a string.
+    let peerIdObj: any;
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      peerIdObj = peerIdFromString(peerId);
+    } catch {
+      throw new Error(`Invalid peer ID: ${shortId}...`);
+    }
+
+    // First try direct dial with the PeerId object
     try {
       log.debug(`Dialing ${shortId}... directly for ${protocol}`);
-      return await this.node.dialProtocol(peerId, protocol, {
+      return await this.node.dialProtocol(peerIdObj, protocol, {
         signal: AbortSignal.timeout(DIAL_TIMEOUT),
       });
     } catch (directErr) {
       log.debug(`Direct dial failed for ${shortId}...: ${(directErr as Error).message}`);
     }
 
-    // Try to find multiaddrs for this peer from DHT/directory
+    // Try to find multiaddrs for this peer from peer store/DHT/directory
     const addrs = await this.resolveMultiaddrs(peerId);
     if (addrs.length === 0) {
-      throw new Error(`Cannot reach peer ${shortId}...: no known multiaddrs (not in libp2p peer store, DHT, or directory)`);
+      throw new Error(`Cannot reach peer ${shortId}...: no known multiaddrs`);
     }
 
-    log.debug(`Resolved ${addrs.length} multiaddrs for ${shortId}...: ${addrs.join(', ')}`);
+    log.debug(`Resolved ${addrs.length} multiaddrs for ${shortId}...`);
 
     // Try each resolved multiaddr with a timeout
     const errors: string[] = [];
     for (const addr of addrs) {
-      // Skip obviously undialable addrs
-      if (addr.includes('/0.0.0.0/') || addr.includes('/ip4/0.0.0.0/')) {
-        log.debug(`Skipping undialable addr: ${addr}`);
-        continue;
-      }
+      if (addr.includes('/0.0.0.0/') || addr.includes('/ip4/0.0.0.0/')) continue;
 
       try {
         const addrWithPeer = addr.includes(`/p2p/${peerId}`) ? addr : `${addr}/p2p/${peerId}`;
@@ -880,12 +870,11 @@ export class NexusClient {
         });
       } catch (addrErr) {
         errors.push(`${addr}: ${(addrErr as Error).message}`);
-        continue;
       }
     }
 
     throw new Error(
-      `Cannot reach peer ${shortId}...: all ${addrs.length} resolved multiaddrs failed.\n` +
+      `Cannot reach peer ${shortId}...: all multiaddrs failed.\n` +
       errors.map(e => `  - ${e}`).join('\n'),
     );
   }
@@ -987,28 +976,21 @@ export class NexusClient {
     const shortId = remotePeerId.slice(0, 12);
     log.info(`Incoming invoke stream from ${shortId}...`);
 
-    // Single-use source iterator — read all messages through this
-    const sourceIterator = stream.source[Symbol.asyncIterator]();
-    const readNext = async (): Promise<InvokeMessage | null> => {
-      try {
-        const { value, done } = await sourceIterator.next();
-        if (done) return null;
-        const raw = value instanceof Uint8Array ? value : new Uint8Array((value as any).buffer ?? []);
-        return decodeStreamMessage(raw);
-      } catch {
-        return null;
-      }
-    };
+    // Single-use reader — works with both v2 (.source) and v3 (stream is AsyncIterable)
+    const reader = streamReader(stream);
 
-    // Single pushable writer — all responses go through this
-    const writer = createStreamWriter(stream);
+    // Helper: read next decoded message
+    const readNext = async (): Promise<InvokeMessage | null> => {
+      const result = await reader.next();
+      return result.done ? null : result.value;
+    };
 
     try {
       // Phase 1: Read invoke.open
       let openMsg: InvokeOpen | null = null;
       while (true) {
         const msg = await readNext();
-        if (!msg) { writer.end(); stream.close?.(); return; }
+        if (!msg) { streamClose(stream); return; }
         if (msg.type === 'invoke.open') { openMsg = msg; break; }
       }
 
@@ -1017,11 +999,11 @@ export class NexusClient {
       // Trust check
       if (!this.trustPolicy.allowPeer(remotePeerId) ||
           !this.trustPolicy.allowCapability(remotePeerId, openMsg.capability)) {
-        writer.push(encodeStreamMessage({
+        streamSend(stream, {
           type: 'invoke.error', version: 1,
           requestId: openMsg.requestId, code: 'FORBIDDEN', message: 'Peer not allowed',
-        }));
-        writer.end();
+        });
+        streamClose(stream);
         return;
       }
 
@@ -1036,13 +1018,13 @@ export class NexusClient {
       const handler = this.capabilityHandlers.get(openMsg.capability);
       if (!handler) {
         log.warn(`Capability "${openMsg.capability}" not registered — have: [${this.getRegisteredCapabilities().join(', ')}]`);
-        writer.push(encodeStreamMessage({
+        streamSend(stream, {
           type: 'invoke.error', version: 1,
           requestId: openMsg.requestId,
           code: 'NOT_FOUND',
           message: `Capability "${openMsg.capability}" not registered`,
-        }));
-        writer.end();
+        });
+        streamClose(stream);
         return;
       }
 
@@ -1051,7 +1033,7 @@ export class NexusClient {
       let paymentRecord: { amount: string; currency: string } | undefined;
 
       if (pricing) {
-        writer.push(encodeStreamMessage({
+        streamSend(stream, {
           type: 'invoke.payment_required', version: 1,
           requestId: openMsg.requestId,
           terms: {
@@ -1060,7 +1042,7 @@ export class NexusClient {
             description: pricing.description,
             validUntil: Date.now() + 300_000,
           },
-        } as InvokePaymentRequired));
+        } as InvokePaymentRequired);
 
         let proofReceived = false;
         const deadline = Date.now() + 30_000;
@@ -1102,12 +1084,12 @@ export class NexusClient {
               }, terms);
 
               if (!valid) {
-                writer.push(encodeStreamMessage({
+                streamSend(stream, {
                   type: 'invoke.error', version: 1,
                   requestId: openMsg.requestId,
                   code: 'PAYMENT_INVALID', message: 'Payment proof validation failed',
-                }));
-                writer.end();
+                });
+                streamClose(stream);
                 return;
               }
 
@@ -1117,16 +1099,16 @@ export class NexusClient {
             break;
           }
 
-          if (msg.type === 'invoke.cancel') { writer.end(); return; }
+          if (msg.type === 'invoke.cancel') { streamClose(stream); return; }
         }
 
         if (!proofReceived) {
-          writer.push(encodeStreamMessage({
+          streamSend(stream, {
             type: 'invoke.error', version: 1,
             requestId: openMsg.requestId,
             code: 'PAYMENT_TIMEOUT', message: 'Payment proof not received within timeout',
-          }));
-          writer.end();
+          });
+          streamClose(stream);
           return;
         }
       }
@@ -1136,13 +1118,13 @@ export class NexusClient {
       const dataListeners: Array<(msg: InvokeMessage) => void> = [];
       const handle: InvokeStreamHandle = {
         write: async (msg: InvokeMessage) => {
-          writer.push(encodeStreamMessage(msg));
+          streamSend(stream, msg);
         },
         onData: (cb: (msg: InvokeMessage) => void) => {
           dataListeners.push(cb);
         },
         close: () => {
-          writer.end();
+          streamClose(stream);
         },
       };
 
@@ -1180,7 +1162,7 @@ export class NexusClient {
 
     } catch (err) {
       log.debug(`Incoming invoke error: ${(err as Error).message}`);
-      writer.end();
+      streamClose(stream);
     }
   }
 

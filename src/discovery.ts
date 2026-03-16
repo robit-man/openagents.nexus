@@ -130,7 +130,12 @@ export const DEFAULT_DISCOVERY: DiscoveryConfig = {
  * Merge partial discovery config with defaults (does not mutate defaults).
  */
 export function resolveDiscovery(partial?: Partial<DiscoveryConfig>): DiscoveryConfig {
-  return { ...DEFAULT_DISCOVERY, ...partial };
+  // Filter out undefined values so they don't overwrite defaults.
+  // e.g. { enableMdns: undefined } should NOT replace DEFAULT_DISCOVERY.enableMdns = true
+  const defined = partial
+    ? Object.fromEntries(Object.entries(partial).filter(([, v]) => v !== undefined))
+    : {};
+  return { ...DEFAULT_DISCOVERY, ...defined };
 }
 
 /**

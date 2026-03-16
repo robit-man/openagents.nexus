@@ -248,10 +248,12 @@ describe('Test Harness: Full network simulation', () => {
     agents.push(agentF, agentG);
 
     await agentF.connect();
-    await agentG.connect();
 
+    // Register listener BEFORE G connects — G may discover F via mDNS during connect
     const connectedPeers: string[] = [];
     agentF.on('peer:connected', (id) => connectedPeers.push(id));
+
+    await agentG.connect();
 
     const addrF = agentF.network.node
       .getMultiaddrs()

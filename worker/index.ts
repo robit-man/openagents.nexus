@@ -68,16 +68,60 @@ let metrics = {
   reportCount: 0,
 };
 
-// Rate limit: max 1 KV write per 5 minutes for directory snapshots
+// ---------------------------------------------------------------------------
+// KV FREE TIER HARD LIMITS (reset daily at 00:00 UTC)
+//
+//   Reads:   100,000/day
+//   Writes:    1,000/day   ← this is the binding constraint
+//   Deletes:   1,000/day
+//   Lists:     1,000/day
+//   Storage:       1 GB
+//
+// We enforce conservative budgets well below these limits so we NEVER
+// hit a KV error in production. Budget is 50% of limit — leaves headroom
+// for manual KV operations, bursts, and accounting drift.
+// ---------------------------------------------------------------------------
+
+const KV_DAILY_READ_BUDGET  = 50_000;  // 50% of 100,000
+const KV_DAILY_WRITE_BUDGET = 500;     // 50% of 1,000
+
+// Per-isolate counters — reset when the UTC day changes.
+// Workers can run across multiple isolates, so this is a best-effort
+// per-isolate guard. The write interval below provides the real protection.
+let kvReadsToday  = 0;
+let kvWritesToday = 0;
+let kvCounterDay  = new Date().getUTCDate();
+
+function resetIfNewDay(): void {
+  const today = new Date().getUTCDate();
+  if (today !== kvCounterDay) {
+    kvReadsToday  = 0;
+    kvWritesToday = 0;
+    kvCounterDay  = today;
+  }
+}
+
+function canRead(): boolean {
+  resetIfNewDay();
+  return kvReadsToday < KV_DAILY_READ_BUDGET;
+}
+
+function canWrite(): boolean {
+  resetIfNewDay();
+  return kvWritesToday < KV_DAILY_WRITE_BUDGET;
+}
+
+// Rate limit: max 1 KV write per 15 minutes for directory snapshots.
+// At 1 write/15min = max 96 writes/day — well within 500 budget.
 let lastDirectoryWrite = 0;
-const DIRECTORY_WRITE_INTERVAL = 300_000; // 5 minutes (was 60s)
+const DIRECTORY_WRITE_INTERVAL = 900_000; // 15 minutes
 
 // ---------------------------------------------------------------------------
 // In-memory KV cache — avoids hitting KV on every request.
 // Workers reuse the same isolate across requests within a deployment,
 // so a global cache is effective. TTL keeps data fresh enough.
 // ---------------------------------------------------------------------------
-const KV_CACHE_TTL = 60_000; // 60 seconds
+const KV_CACHE_TTL = 120_000; // 2 minutes (was 60s)
 
 interface CacheEntry {
   data: any;
@@ -93,7 +137,15 @@ async function cachedKVGet(kv: KVNamespace, key: string): Promise<any> {
     return cached.data;
   }
 
+  // Hard-stop: refuse KV reads if budget exhausted
+  if (!canRead()) {
+    // Return stale cache if available, otherwise null
+    const stale = kvCache.get(key);
+    return stale?.data ?? null;
+  }
+
   try {
+    kvReadsToday++;
     const data = await kv.get(key, 'json');
     kvCache.set(key, { data, expiry: now + KV_CACHE_TTL });
     return data;
@@ -200,11 +252,13 @@ export default {
           return json({ error: 'peerId required' }, 400);
         }
 
-        // Rate limit KV writes
+        // Rate limit KV writes — two checks: time interval AND daily budget
         const now = Date.now();
         if (now - lastDirectoryWrite < DIRECTORY_WRITE_INTERVAL) {
-          // Accept the data but skip the KV write — in-memory only
           return json({ ok: true, persisted: false, reason: 'rate-limited', nextWriteIn: DIRECTORY_WRITE_INTERVAL - (now - lastDirectoryWrite) });
+        }
+        if (!canWrite()) {
+          return json({ ok: true, persisted: false, reason: 'daily-kv-write-budget-exhausted', writesToday: kvWritesToday, budget: KV_DAILY_WRITE_BUDGET });
         }
 
         // Read existing directory from cache (avoids extra KV read)
@@ -254,8 +308,9 @@ export default {
           },
         };
 
-        // Single KV write — max once per 5 minutes
+        // Single KV write — max once per 15 minutes, budget-checked
         try {
+          kvWritesToday++;
           await env.AGENTS.put('known-agents', JSON.stringify(directory));
 
           // Update in-memory cache immediately
@@ -267,6 +322,19 @@ export default {
         } catch (kvErr) {
           return json({ ok: true, persisted: false, reason: 'kv-write-error', error: String(kvErr) });
         }
+      }
+
+      // ── KV budget diagnostic — no KV ops, just returns counters ──
+      case '/api/v1/kv/budget': {
+        resetIfNewDay();
+        return json({
+          reads:  { used: kvReadsToday,  budget: KV_DAILY_READ_BUDGET,  limit: 100_000, pct: Math.round(kvReadsToday / KV_DAILY_READ_BUDGET * 100) },
+          writes: { used: kvWritesToday, budget: KV_DAILY_WRITE_BUDGET, limit: 1_000,   pct: Math.round(kvWritesToday / KV_DAILY_WRITE_BUDGET * 100) },
+          writeInterval: `${DIRECTORY_WRITE_INTERVAL / 1000}s`,
+          cacheEntries: kvCache.size,
+          cacheTTL: `${KV_CACHE_TTL / 1000}s`,
+          note: 'Per-isolate counters. Multiple isolates may run in parallel — actual usage may be higher.',
+        });
       }
 
       // ── x402 payment rail status ──

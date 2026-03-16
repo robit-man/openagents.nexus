@@ -1267,52 +1267,9 @@ async function loadDirectory() {
   } catch { /* directory unavailable — NATS will handle it */ }
 }
 
-// Write accumulated NATS + directory state back to KV every 5 minutes
-// This persists the view for the next visitor. Server rate-limits to 1 write/5min.
-function startDirectoryWriteback() {
-  setInterval(async () => {
-    if (natsAgents.size === 0 && knownAgents.size === 0) return;
-
-    // Merge all known agents from NATS + directory
-    const allAgents = [];
-    const seen = new Set();
-
-    for (const [peerId, ann] of natsAgents) {
-      if (seen.has(peerId)) continue;
-      seen.add(peerId);
-      allAgents.push({
-        peerId,
-        agentName: ann.agentName || 'anon',
-        multiaddrs: ann.multiaddrs || [],
-        rooms: ann.rooms || [],
-        nknAddress: ann.nknAddress || undefined,
-      });
-    }
-
-    // Also include directory-loaded agents not seen via NATS
-    for (const [peerId, entry] of knownAgents) {
-      if (seen.has(peerId)) continue;
-      seen.add(peerId);
-      allAgents.push({
-        peerId,
-        agentName: entry.data?.agentName || 'anon',
-        multiaddrs: entry.data?.multiaddrs || [],
-        rooms: entry.data?.rooms || [],
-        nknAddress: entry.data?.nknAddress || undefined,
-      });
-    }
-
-    if (allAgents.length === 0) return;
-
-    try {
-      await fetch('/api/v1/directory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(allAgents[0]), // post one agent at a time, worker aggregates
-      });
-    } catch { /* silent */ }
-  }, 300_000); // 5 minutes
-}
+// Directory writeback REMOVED — browsers must NEVER write to KV.
+// KV writes come only from agent-side NexusClient.registerInDirectory().
+// The frontend discovers agents via NATS (real-time) and KV reads (cold start).
 
 // Initialise
 pushLog('Fetching network state...');
@@ -1323,11 +1280,10 @@ loadDirectory();
 // 2. Fetch bootstrap + metrics
 fetchBootstrap().then(() => {
   fetchNetwork();
-  setInterval(fetchNetwork, 30_000); // 30s — KV is cached server-side, no need to hammer
+  setInterval(fetchNetwork, 60_000); // 60s — KV is cached server-side (120s TTL)
 });
 
-// 3. Start KV writeback (1 write per 60s max)
-startDirectoryWriteback();
+// 3. KV writeback removed — only agents write, browsers read-only
 
 // ─────────────────────────────────────────────
 //  NATS BROWSER CONNECTION — live agent discovery

@@ -444,7 +444,7 @@
 <div id="bottom-bar" aria-label="Network metrics">
   <div class="dial-container"><div class="dial-label">peers</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-peers-arc"/></svg><div class="dial-center-text" id="dial-peers-val">0</div></div></div>
   <div class="dial-container"><div class="dial-label">rooms</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-rooms-arc"/></svg><div class="dial-center-text" id="dial-rooms-val">0</div></div></div>
-  <div class="dial-container"><div class="dial-label">pins</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-pins-arc"/></svg><div class="dial-center-text" id="dial-pins-val">0</div></div></div>
+  <div class="dial-container"><div class="dial-label">x402</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-x402-arc"/></svg><div class="dial-center-text" id="dial-x402-val">--</div></div></div>
   <div class="dial-container"><div class="dial-label">msg/s</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-msg-arc"/></svg><div class="dial-center-text" id="dial-msg-val">0</div></div></div>
   <div class="dial-container"><div class="dial-label">up</div><div class="dial-svg-wrap"><svg class="dial-svg" viewBox="0 0 64 64" aria-hidden="true"><circle class="dial-track" cx="32" cy="32" r="26"/><circle class="dial-progress" cx="32" cy="32" r="26" id="dial-uptime-arc"/></svg><div class="dial-center-text" id="dial-uptime-val">0s</div></div></div>
 </div>
@@ -812,7 +812,7 @@ function setDial(arcId, valId, pct, displayVal) {
 // Initialise all dials at zero
 setDial('dial-peers-arc',  'dial-peers-val',  0, '0');
 setDial('dial-rooms-arc',  'dial-rooms-val',  0, '0');
-setDial('dial-pins-arc',   'dial-pins-val',   0, '0');
+setDial('dial-x402-arc',   'dial-x402-val',   0, '--');
 setDial('dial-msg-arc',    'dial-msg-val',    0, '0');
 setDial('dial-uptime-arc', 'dial-uptime-val', 0, '0s');
 
@@ -826,16 +826,18 @@ function formatUptime(seconds) {
 
 // Update dials from network API data
 function updateDials(network, bootstrapPeerCount) {
-  // Peers: prefer API peerCount, fall back to bootstrap count
-  const peers = network.peerCount != null ? network.peerCount : bootstrapPeerCount;
-  // For the arc percentage, treat 100 peers as a reasonable upper bound
-  setDial('dial-peers-arc', 'dial-peers-val', (peers / 100) * 100, String(peers));
+  // Peers: use max of API peerCount, NATS-discovered agents, and bootstrap count
+  // This prevents the 10s network poll from resetting NATS-discovered peer count to 0
+  const apiPeers = network.peerCount || 0;
+  const natsPeers = typeof natsAgents !== 'undefined' ? natsAgents.size : 0;
+  const peers = Math.max(apiPeers, natsPeers, bootstrapPeerCount > 0 ? 0 : 0) || bootstrapPeerCount;
+  const effectivePeers = Math.max(apiPeers, natsPeers) || bootstrapPeerCount;
+  setDial('dial-peers-arc', 'dial-peers-val', (effectivePeers / 100) * 100, String(effectivePeers));
 
-  const rooms = network.roomCount || 0;
+  const rooms = Math.max(network.roomCount || 0, 1);
   setDial('dial-rooms-arc', 'dial-rooms-val', (rooms / 20) * 100, String(rooms));
 
-  // Pins: not tracked yet — stays 0
-  setDial('dial-pins-arc', 'dial-pins-val', 0, '0');
+  // x402 dial is updated by fetchX402Status(), not here
 
   const msgRate = network.messageRate || 0;
   setDial('dial-msg-arc', 'dial-msg-val', (msgRate / 100) * 100, String(msgRate));
@@ -1013,7 +1015,7 @@ let knownPeerCount = 0;
 const knownAgents = new Map(); // peerId -> { index in nodes[], data }
 
 function reconcileAgents(networkData) {
-  const liveAgents = networkData.agents || [];
+  const liveAgents = networkData.knownAgents || networkData.agents || [];
   if (liveAgents.length === 0) return;
 
   let added = 0;
@@ -1327,6 +1329,35 @@ function renderNatsAgentCard(ann) {
 }
 
 connectNats();
+
+// ─────────────────────────────────────────────
+//  x402 PAYMENT RAIL STATUS
+// ─────────────────────────────────────────────
+async function fetchX402Status() {
+  try {
+    const res = await fetch('/api/v1/x402/status');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (data.enabled) {
+      setDial('dial-x402-arc', 'dial-x402-val', 100, 'ON');
+      pushLog('x402: <span class="log-highlight">USDC payments active</span> on Base');
+    } else {
+      setDial('dial-x402-arc', 'dial-x402-val', 0, 'OFF');
+      pushLog('x402: structural-only (no Alchemy key)');
+    }
+
+    // Show reference price if available
+    if (data.ethPrice) {
+      pushLog(`ETH: <span class="log-highlight">$${data.ethPrice}</span> | USDC: <span class="log-highlight">$1.00</span>`);
+    }
+  } catch {
+    setDial('dial-x402-arc', 'dial-x402-val', 0, '--');
+  }
+}
+
+fetchX402Status();
+setInterval(fetchX402Status, 60_000); // refresh every 60s
 
 // ─────────────────────────────────────────────
 //  COPY INSTALL COMMAND

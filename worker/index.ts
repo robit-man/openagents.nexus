@@ -16,6 +16,7 @@ import { INDEX_HTML } from './html.js';
 
 interface Env {
   AGENTS: KVNamespace;
+  ALCHEMY_API_KEY?: string;
 }
 
 const PUBLIC_BOOTSTRAP = [
@@ -243,6 +244,34 @@ export default {
           // KV write failed — return success with persisted: false so agent knows
           return json({ ok: true, persisted: false, reason: 'kv-write-error', error: String(kvErr) });
         }
+      }
+
+      // ── x402 payment rail status ──
+      case '/api/v1/x402/status': {
+        const alchemyConfigured = !!env.ALCHEMY_API_KEY;
+        let ethPrice: string | null = null;
+
+        // Fetch ETH price from CoinGecko (free, no auth, cached at edge)
+        try {
+          const priceRes = await fetch(
+            'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+            { cf: { cacheTtl: 300 } as any }, // cache 5 minutes at edge
+          );
+          if (priceRes.ok) {
+            const priceData = await priceRes.json() as any;
+            ethPrice = priceData?.ethereum?.usd?.toFixed(2) ?? null;
+          }
+        } catch { /* price fetch is best-effort */ }
+
+        return json({
+          enabled: alchemyConfigured,
+          network: 'base',
+          chainId: 8453,
+          usdcContract: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+          verification: alchemyConfigured ? 'on-chain (Alchemy RPC)' : 'structural-only',
+          ethPrice,
+          usdcPrice: '1.00',
+        });
       }
 
       // ── Agent instructions — machine-readable onboarding for LLMs/agents ──

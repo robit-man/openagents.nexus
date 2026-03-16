@@ -631,7 +631,7 @@ export class NexusClient {
     const maxDurationMs = options?.maxDurationMs ?? 30_000;
     const streamMode = options?.stream ?? false;
 
-    const stream = await this.node.dialProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
+    const stream = await this.dialPeerProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
 
     // Send invoke.open
     const open: InvokeOpen = {
@@ -771,12 +771,96 @@ export class NexusClient {
   async sendDM(peerId: string, content: string, format = 'text/plain'): Promise<void> {
     this.ensureConnected();
 
-    const stream = await this.node.dialProtocol(peerId, STREAM_PROTOCOLS.DM);
+    const stream = await this.dialPeerProtocol(peerId, STREAM_PROTOCOLS.DM);
     const dmMsg = new TextEncoder().encode(
       JSON.stringify({ type: 'dm.message', version: 1, messageId: uuidv7(), contentFormat: format, content }) + '\n',
     );
     await stream.sink([dmMsg]);
     stream.close?.();
+  }
+
+  // --- Peer dialing helper ---
+
+  /**
+   * Dial a peer with a specific protocol, resolving multiaddrs from
+   * multiple sources if the peer isn't in libp2p's peer store.
+   *
+   * Resolution order:
+   * 1. Direct libp2p dial (peer store / DHT)
+   * 2. NATS announcements (if we've seen this peer via NATS)
+   * 3. DHT profile lookup
+   */
+  private async dialPeerProtocol(peerId: string, protocol: string): Promise<any> {
+    // First try direct dial — works when libp2p knows the peer
+    try {
+      return await this.node.dialProtocol(peerId, protocol);
+    } catch (directErr) {
+      log.debug(`Direct dial failed for ${peerId.slice(0, 12)}...: ${(directErr as Error).message}`);
+    }
+
+    // Try to find multiaddrs for this peer from NATS or DHT
+    const addrs = await this.resolveMultiaddrs(peerId);
+    if (addrs.length === 0) {
+      throw new Error(`Cannot reach peer ${peerId.slice(0, 12)}...: no known multiaddrs (not in libp2p peer store, NATS, or DHT)`);
+    }
+
+    // Add the resolved addresses to libp2p's address book, then dial
+    for (const addr of addrs) {
+      try {
+        // libp2p's peerStore.merge adds addresses without overwriting
+        await this.node.peerStore?.merge?.(peerId, { multiaddrs: [addr] });
+      } catch {
+        // peerStore API varies — best effort
+      }
+    }
+
+    // Try each multiaddr directly
+    for (const addr of addrs) {
+      try {
+        const addrWithPeer = addr.includes(`/p2p/${peerId}`) ? addr : `${addr}/p2p/${peerId}`;
+        return await this.node.dialProtocol(addrWithPeer, protocol);
+      } catch {
+        continue;
+      }
+    }
+
+    throw new Error(`Cannot reach peer ${peerId.slice(0, 12)}...: all ${addrs.length} resolved multiaddrs failed`);
+  }
+
+  /**
+   * Resolve a peer's multiaddrs from NATS announcements and DHT profiles.
+   */
+  private async resolveMultiaddrs(peerId: string): Promise<string[]> {
+    const addrs: string[] = [];
+
+    // Check DHT profile
+    try {
+      if (this.dhtManager) {
+        const profile = await this.dhtManager.registry.findProfile(peerId);
+        if (profile?.transports) {
+          addrs.push(...profile.transports);
+        }
+      }
+    } catch {
+      // DHT lookup failed — not fatal
+    }
+
+    // Check directory (HTTP fallback)
+    try {
+      const hubUrl = this.config.signalingServer;
+      const res = await fetch(`${hubUrl}/api/v1/directory`, { signal: AbortSignal.timeout(3_000) });
+      if (res.ok) {
+        const dir = await res.json() as any;
+        const agent = (dir.agents || []).find((a: any) => a.peerId === peerId);
+        if (agent?.multiaddrs) {
+          addrs.push(...agent.multiaddrs);
+        }
+      }
+    } catch {
+      // directory fetch failed — not fatal
+    }
+
+    return [...new Set(addrs)]; // deduplicate
   }
 
   // --- Capability registration (incoming invocation handling) ---

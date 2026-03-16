@@ -41,7 +41,10 @@ import {
   type InvokeMessage,
   type InvokeHandler,
   type InvokeStreamHandle,
+  type InvokePaymentRequired,
+  type InvokePaymentProof,
 } from './protocols/index.js';
+import type { PaymentTerms } from './x402/types.js';
 import { NatsDiscovery } from './nats/index.js';
 import type { NatsAgentAnnouncement } from './nats/index.js';
 import { NknFallback } from './nkn/index.js';
@@ -114,6 +117,17 @@ export interface CreateRoomOptions {
   access?: 'public';
 }
 
+export interface CapabilityOptions {
+  /** When set, the provider gates the capability behind x402 payment.
+   *  Amount is in smallest unit (e.g. "100000" = 0.10 USDC with 6 decimals).
+   *  Set amount to "0" for free-tier (protocol dance without on-chain tx). */
+  pricing?: {
+    amount: string;
+    currency: 'USDC' | 'ETH' | 'BASE_ETH';
+    description?: string;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Typed event map
 // ---------------------------------------------------------------------------
@@ -148,6 +162,7 @@ export class NexusClient {
   private natsAnnounceTimer: ReturnType<typeof setInterval> | null = null;
   private nknFallback: NknFallback | null = null;
   private capabilityHandlers = new Map<string, InvokeHandler>();
+  private capabilityPricing = new Map<string, CapabilityOptions['pricing']>();
   private _trustPolicy: DefaultTrustPolicy | null = null;
   private _metering: MeteringEngine | null = null;
   private invokeHandlerRegistered = false;
@@ -643,14 +658,78 @@ export class NexusClient {
     });
     await stream.sink([chunk]);
 
+    // Helper: handle invoke.payment_required by auto-signing and sending proof
+    const handlePaymentRequired = async (msg: InvokePaymentRequired, s: any): Promise<void> => {
+      if (!this._x402?.walletAddress) {
+        throw new Error('Provider requires payment but x402 wallet is not initialized. Call nexus.x402.initWallet() first.');
+      }
+
+      const terms: PaymentTerms = {
+        amount: msg.terms.amount,
+        currency: (msg.terms.currency as PaymentTerms['currency']) || 'USDC',
+        network: 'base',
+        recipient: msg.terms.recipient,
+        description: msg.terms.description ?? '',
+        expiresAt: msg.terms.validUntil ?? (Date.now() + 300_000),
+        requestId: msg.requestId,
+      };
+
+      log.info(`Payment required for ${capability}: ${terms.amount} ${terms.currency}`);
+
+      // For $0 free tier, send a stub proof (no real signing needed)
+      if (terms.amount === '0') {
+        const proofMsg: InvokePaymentProof = {
+          type: 'invoke.payment_proof',
+          version: 1,
+          requestId,
+          proof: {
+            from: this._x402.walletAddress!,
+            to: terms.recipient,
+            amount: '0',
+            currency: terms.currency,
+            signature: '0x',
+            nonce: '0x',
+            validAfter: 0,
+            validBefore: 0,
+          },
+        };
+        await s.sink([encodeStreamMessage(proofMsg)]);
+        return;
+      }
+
+      const proof = await this._x402.signPayment(terms);
+      const proofMsg: InvokePaymentProof = {
+        type: 'invoke.payment_proof',
+        version: 1,
+        requestId,
+        proof: {
+          from: proof.authorization?.from ?? proof.payment.payer,
+          to: proof.authorization?.to ?? proof.payment.recipient,
+          amount: proof.payment.amount,
+          currency: proof.payment.currency,
+          signature: proof.signature,
+          nonce: proof.authorization?.nonce ?? '',
+          validAfter: Number(proof.authorization?.validAfter ?? 0),
+          validBefore: Number(proof.authorization?.validBefore ?? 0),
+        },
+      };
+      await s.sink([encodeStreamMessage(proofMsg)]);
+    };
+
     if (streamMode) {
+      const outerStream = stream;
+      const self = this;
       // Return an async iterable of InvokeEvent messages
       async function* iterateEvents(): AsyncIterable<InvokeEvent> {
-        for await (const data of stream.source) {
+        for await (const data of outerStream.source) {
           const msg = decodeStreamMessage(
             data instanceof Uint8Array ? data : (data as { subarray?: () => Uint8Array }).subarray?.() ?? new Uint8Array(0),
           );
           if (!msg) continue;
+          if (msg.type === 'invoke.payment_required') {
+            await handlePaymentRequired(msg as InvokePaymentRequired, outerStream);
+            continue; // keep waiting for accept/events
+          }
           if (msg.type === 'invoke.event') yield msg;
           if (msg.type === 'invoke.done' || msg.type === 'invoke.error') break;
           if (msg.type === 'invoke.cancel') break;
@@ -665,6 +744,10 @@ export class NexusClient {
       const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
       const msg = decodeStreamMessage(raw);
       if (!msg) continue;
+      if (msg.type === 'invoke.payment_required') {
+        await handlePaymentRequired(msg as InvokePaymentRequired, stream);
+        continue; // keep waiting for accept/events after payment
+      }
       if (msg.type === 'invoke.event') events.push(msg);
       if (msg.type === 'invoke.done') break;
       if (msg.type === 'invoke.error') {
@@ -702,10 +785,19 @@ export class NexusClient {
    * Register a named capability handler. When a remote peer invokes this
    * capability via the /nexus/invoke/1.1.0 protocol, the handler is called.
    *
+   * When `options.pricing` is set, the provider gates the capability behind
+   * x402 payment: sends invoke.payment_required, waits for proof, validates,
+   * then dispatches to the handler.
+   *
    * On first registration, the libp2p protocol handler is set up.
    */
-  registerCapability(name: string, handler: InvokeHandler): void {
+  registerCapability(name: string, handler: InvokeHandler, options?: CapabilityOptions): void {
     this.capabilityHandlers.set(name, handler);
+    if (options?.pricing) {
+      this.capabilityPricing.set(name, options.pricing);
+    } else {
+      this.capabilityPricing.delete(name);
+    }
 
     // Register the libp2p protocol handler on first use
     if (!this.invokeHandlerRegistered && this.node) {
@@ -715,7 +807,7 @@ export class NexusClient {
       this.invokeHandlerRegistered = true;
     }
 
-    log.info(`Registered capability: ${name}`);
+    log.info(`Registered capability: ${name}${options?.pricing ? ` (${options.pricing.amount} ${options.pricing.currency})` : ''}`);
   }
 
   /**
@@ -723,6 +815,7 @@ export class NexusClient {
    */
   unregisterCapability(name: string): void {
     this.capabilityHandlers.delete(name);
+    this.capabilityPricing.delete(name);
     log.info(`Unregistered capability: ${name}`);
   }
 
@@ -789,6 +882,124 @@ export class NexusClient {
         return;
       }
 
+      // --- x402 payment gate ---
+      const pricing = this.capabilityPricing.get(openMsg.capability);
+      let paymentRecord: { amount: string; currency: string } | undefined;
+
+      if (pricing) {
+        // Send invoke.payment_required with terms
+        const paymentReq: InvokePaymentRequired = {
+          type: 'invoke.payment_required',
+          version: 1,
+          requestId: openMsg.requestId,
+          terms: {
+            amount: pricing.amount,
+            currency: pricing.currency,
+            recipient: this._x402?.walletAddress ?? '',
+            description: pricing.description,
+            validUntil: Date.now() + 300_000,
+          },
+        };
+        await stream.sink([encodeStreamMessage(paymentReq)]);
+
+        // Wait for invoke.payment_proof from consumer
+        let proofReceived = false;
+        const proofTimeout = setTimeout(() => {
+          if (!proofReceived) {
+            stream.sink([encodeStreamMessage({
+              type: 'invoke.error',
+              version: 1,
+              requestId: openMsg.requestId,
+              code: 'PAYMENT_TIMEOUT',
+              message: 'Payment proof not received within timeout',
+            })]).catch(() => {});
+            stream.close?.();
+          }
+        }, 30_000);
+
+        try {
+          for await (const data of stream.source) {
+            const raw = data instanceof Uint8Array ? data : new Uint8Array((data as any).buffer ?? []);
+            const msg = decodeStreamMessage(raw);
+            if (!msg) continue;
+            if (msg.type === 'invoke.payment_proof') {
+              proofReceived = true;
+              clearTimeout(proofTimeout);
+
+              const proof = (msg as InvokePaymentProof).proof;
+
+              // For $0 free tier — skip validation, just proceed
+              if (pricing.amount === '0') {
+                log.info(`Free-tier invocation of ${openMsg.capability} from ${remotePeerId.slice(0, 12)}...`);
+                paymentRecord = { amount: '0', currency: pricing.currency };
+                break;
+              }
+
+              // Validate via x402
+              if (this._x402) {
+                const terms: PaymentTerms = {
+                  amount: pricing.amount,
+                  currency: pricing.currency,
+                  network: 'base',
+                  recipient: this._x402.walletAddress ?? '',
+                  description: pricing.description ?? '',
+                  expiresAt: Date.now() + 300_000,
+                  requestId: openMsg.requestId,
+                };
+
+                const valid = await this._x402.validatePayment({
+                  signature: proof.signature,
+                  payment: {
+                    requestId: openMsg.requestId,
+                    amount: proof.amount,
+                    currency: proof.currency,
+                    network: 'base',
+                    recipient: proof.to,
+                    payer: proof.from,
+                    timestamp: Date.now(),
+                  },
+                  authorization: {
+                    from: proof.from,
+                    to: proof.to,
+                    value: proof.amount,
+                    validAfter: String(proof.validAfter),
+                    validBefore: String(proof.validBefore),
+                    nonce: proof.nonce,
+                  },
+                }, terms);
+
+                if (!valid) {
+                  await stream.sink([encodeStreamMessage({
+                    type: 'invoke.error',
+                    version: 1,
+                    requestId: openMsg.requestId,
+                    code: 'PAYMENT_INVALID',
+                    message: 'Payment proof validation failed',
+                  })]);
+                  stream.close?.();
+                  return;
+                }
+
+                paymentRecord = { amount: proof.amount, currency: proof.currency };
+                log.info(`Payment validated for ${openMsg.capability}: ${proof.amount} ${proof.currency}`);
+              }
+              break;
+            }
+            if (msg.type === 'invoke.cancel') {
+              clearTimeout(proofTimeout);
+              stream.close?.();
+              return;
+            }
+          }
+        } catch {
+          clearTimeout(proofTimeout);
+          stream.close?.();
+          return;
+        }
+
+        if (!proofReceived) return;
+      }
+
       // Build stream handle for the handler
       const dataListeners: Array<(msg: InvokeMessage) => void> = [];
       const handle: InvokeStreamHandle = {
@@ -832,6 +1043,7 @@ export class NexusClient {
         inputBytes: 0,
         outputBytes: 0,
         durationMs,
+        payment: paymentRecord ? { amount: paymentRecord.amount, currency: paymentRecord.currency } : undefined,
       });
 
     } catch (err) {
@@ -1103,3 +1315,5 @@ export type { RoomMember } from './chat/index.js';
 export { MeteringEngine } from './metering/index.js';
 export { createFileAuditHook } from './metering/file-logger.js';
 export type { UsageRecord, PeerUsageSummary, UsageFilter, MeteringHook } from './metering/index.js';
+
+// PaymentTerms already exported via x402/index.js above

@@ -263,6 +263,36 @@
   .log-text .log-peer { color: #aaaaaa; }
   .log-text .log-room { color: #aaaaaa; }
 
+  /* ── KV PEERS DROPDOWN ── */
+  #kv-peers-dropdown {
+    border: none; margin: 0; padding: 0;
+  }
+  #kv-peers-dropdown summary {
+    padding: 4px 10px; font-size: 7px; color: #555;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 4px;
+  }
+  #kv-peers-dropdown summary::-webkit-details-marker { display: none; }
+  #kv-peers-dropdown summary::before {
+    content: '\25B8'; font-size: 8px; color: #444;
+    transition: transform 0.2s;
+  }
+  #kv-peers-dropdown[open] summary::before { transform: rotate(90deg); }
+  #kv-peers-dropdown .kv-peers-list { padding: 0 4px 4px; }
+
+  /* ── REPEAT BADGE ── */
+  .log-entry { position: relative; }
+  .log-repeat-badge {
+    position: absolute; top: 1px; right: 2px;
+    font-size: 7px; color: #555; background: rgba(255,255,255,0.06);
+    border-radius: 3px; padding: 0 3px; line-height: 14px;
+    cursor: pointer; user-select: none;
+  }
+  .log-repeat-badge:hover { color: #888; background: rgba(255,255,255,0.1); }
+  .log-entry.collapsed-repeat { display: none; }
+  .log-entry.repeat-parent { cursor: pointer; }
+
   /* ── DIALS — bottom-right vertical stack ── */
   #bottom-bar {
     position: fixed;
@@ -427,13 +457,6 @@
     font-family: var(--font); font-size: 9px; outline: none;
   ">
   <div id="nodes-list" role="list"></div>
-  <label id="infra-toggle" style="
-    display:flex;align-items:center;gap:4px;padding:4px 10px;font-size:8px;color:#444;
-    cursor:pointer;user-select:none;border-top:1px solid rgba(255,255,255,0.04);flex-shrink:0;
-  ">
-    <input type="checkbox" id="show-infra" style="accent-color:#555;width:10px;height:10px">
-    show infrastructure
-  </label>
   <div style="padding:6px 10px;font-size:8px;color:#444;border-top:1px solid rgba(255,255,255,0.04);flex-shrink:0">
     <span id="install-box" style="cursor:pointer;color:#666" title="copy">npm i -g open-agents-ai</span>
     &nbsp;·&nbsp;
@@ -792,11 +815,65 @@ function nowStr() {
     .map(n => String(n).padStart(2, '0')).join(':');
 }
 
+// Track the last log entry for repeat deduplication
+let lastLogHtml = '';
+let lastLogEntry = null;
+let lastLogCount = 0;
+
 function pushLog(html) {
+  // Deduplicate: if this message matches the last one, increment badge
+  if (html === lastLogHtml && lastLogEntry) {
+    lastLogCount++;
+    let badge = lastLogEntry.querySelector('.log-repeat-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'log-repeat-badge';
+      badge.title = 'click to expand';
+      lastLogEntry.classList.add('repeat-parent');
+      lastLogEntry.appendChild(badge);
+
+      // Click badge to expand/collapse all hidden repeats
+      badge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const expanded = badge.dataset.expanded === '1';
+        // Find all collapsed siblings until the next non-collapsed entry
+        let el = lastLogEntry.nextElementSibling;
+        while (el && el.classList.contains('collapsed-repeat') && el.dataset.group === badge.dataset.group) {
+          el.style.display = expanded ? 'none' : '';
+          el.classList.toggle('collapsed-repeat', expanded);
+          el = el.nextElementSibling;
+        }
+        badge.dataset.expanded = expanded ? '0' : '1';
+      });
+    }
+    badge.textContent = `×${lastLogCount}`;
+    badge.dataset.group = lastLogEntry.dataset.logGroup || '';
+
+    // Also create the hidden repeat entry (shown on expand)
+    const hiddenRow = document.createElement('div');
+    hiddenRow.className = 'log-entry collapsed-repeat';
+    hiddenRow.dataset.group = lastLogEntry.dataset.logGroup || '';
+    hiddenRow.style.display = 'none';
+    hiddenRow.innerHTML = `<span class="log-time">${nowStr()}</span><span class="log-arrow">&#9656;</span><span class="log-text">${html}</span>`;
+    activityLog.appendChild(hiddenRow);
+
+    while (activityLog.children.length > MAX_LOG) activityLog.removeChild(activityLog.firstChild);
+    activityLog.scrollTop = activityLog.scrollHeight;
+    return;
+  }
+
+  // New distinct message
+  const groupId = 'g' + Date.now();
   const row = document.createElement('div');
   row.className = 'log-entry';
+  row.dataset.logGroup = groupId;
   row.innerHTML = `<span class="log-time">${nowStr()}</span><span class="log-arrow">&#9656;</span><span class="log-text">${html}</span>`;
   activityLog.appendChild(row);
+
+  lastLogHtml = html;
+  lastLogEntry = row;
+  lastLogCount = 1;
+
   while (activityLog.children.length > MAX_LOG) activityLog.removeChild(activityLog.firstChild);
   activityLog.scrollTop = activityLog.scrollHeight;
 }
@@ -895,15 +972,10 @@ function extractShortLabel(hostname) {
 }
 
 function renderPeerCards(bootstrapPeers) {
-  nodesList.innerHTML = '';
+  // Remove any existing KV dropdown
+  document.getElementById('kv-peers-dropdown')?.remove();
 
-  if (!bootstrapPeers || bootstrapPeers.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    empty.textContent = 'No peers discovered';
-    nodesList.appendChild(empty);
-    return;
-  }
+  if (!bootstrapPeers || bootstrapPeers.length === 0) return;
 
   // Deduplicate by peer ID (multiple multiaddrs may share a peer)
   const seen = new Map(); // peerId -> { hostname, transport, peerId }
@@ -915,7 +987,6 @@ function renderPeerCards(bootstrapPeers) {
     if (!seen.has(peerId)) {
       seen.set(peerId, { hostname, transport, peerId });
     } else {
-      // Prefer WSS transport entry if we see a better one
       const existing = seen.get(peerId);
       if (transport === 'WSS' && existing.transport !== 'WSS') {
         seen.set(peerId, { hostname, transport, peerId });
@@ -923,16 +994,25 @@ function renderPeerCards(bootstrapPeers) {
     }
   });
 
-  // Bootstrap cards are hidden by default — toggled via "show infrastructure"
-  const showInfra = document.getElementById('show-infra')?.checked ?? false;
+  if (seen.size === 0) return;
+
+  // Build collapsible <details> dropdown — closed by default
+  const details = document.createElement('details');
+  details.id = 'kv-peers-dropdown';
+
+  const summary = document.createElement('summary');
+  summary.textContent = `kv peers (${seen.size})`;
+  details.appendChild(summary);
+
+  const list = document.createElement('div');
+  list.className = 'kv-peers-list';
 
   seen.forEach(({ hostname, transport, peerId }) => {
     const label = extractShortLabel(hostname);
     const shortId = peerId.slice(0, 8);
-    const card    = document.createElement('div');
+    const card = document.createElement('div');
     card.className = 'peer-card bootstrap-node';
     card.setAttribute('role', 'listitem');
-    if (!showInfra) card.style.display = 'none';
     card.innerHTML = `
       <div class="peer-name">
         <div class="peer-dot"></div>
@@ -943,8 +1023,13 @@ function renderPeerCards(bootstrapPeers) {
         <div class="peer-meta-item">${shortId}...</div>
       </div>
     `;
-    nodesList.appendChild(card);
+    list.appendChild(card);
   });
+
+  details.appendChild(list);
+
+  // Insert dropdown AFTER live agents (at the bottom of the list)
+  nodesList.appendChild(details);
 }
 
 function renderAgentCards(agents) {
@@ -1401,28 +1486,18 @@ if (topCmd) topCmd.addEventListener('click', doCopy);
 // ─────────────────────────────────────────────
 document.getElementById('node-search').addEventListener('input', (e) => {
   const q = e.target.value.toLowerCase();
-  const showInfra = document.getElementById('show-infra')?.checked ?? false;
   document.querySelectorAll('.peer-card').forEach(card => {
     const text = card.textContent.toLowerCase();
-    const isBootstrap = card.classList.contains('bootstrap-node');
-    if (isBootstrap && !showInfra) {
-      card.style.display = 'none';
-    } else {
-      card.style.display = text.includes(q) ? '' : 'none';
-    }
+    card.style.display = text.includes(q) ? '' : 'none';
   });
-});
-
-// Infrastructure toggle — show/hide bootstrap nodes
-document.getElementById('show-infra').addEventListener('change', (e) => {
-  const show = e.target.checked;
-  document.querySelectorAll('.peer-card.bootstrap-node').forEach(card => {
-    card.style.display = show ? '' : 'none';
-  });
-  // Also show/hide bootstrap-related dividers
-  document.querySelectorAll('.agent-divider').forEach(div => {
-    div.style.display = show ? '' : 'none';
-  });
+  // Also filter the KV dropdown
+  const kvDropdown = document.getElementById('kv-peers-dropdown');
+  if (kvDropdown) {
+    const hasMatch = Array.from(kvDropdown.querySelectorAll('.peer-card')).some(c =>
+      c.textContent.toLowerCase().includes(q)
+    );
+    kvDropdown.style.display = (q && !hasMatch) ? 'none' : '';
+  }
 });
 
 // ─────────────────────────────────────────────

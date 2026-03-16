@@ -145,6 +145,9 @@ export async function createNexusNode(
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
     peerDiscovery,
+    connectionManager: {
+      dialTimeout: 10_000, // 10s — fail fast, don't hang
+    },
     services: {
       identify: identify(),
       ping: ping(),

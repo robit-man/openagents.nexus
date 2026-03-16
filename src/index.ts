@@ -791,40 +791,52 @@ export class NexusClient {
    * 3. DHT profile lookup
    */
   private async dialPeerProtocol(peerId: string, protocol: string): Promise<any> {
-    // First try direct dial — works when libp2p knows the peer
+    const DIAL_TIMEOUT = 10_000; // 10 seconds per attempt — fail fast, don't hang
+    const shortId = peerId.slice(0, 12);
+
+    // First try direct dial — works when libp2p knows the peer via mDNS/DHT/pubsub
     try {
-      return await this.node.dialProtocol(peerId, protocol);
+      log.debug(`Dialing ${shortId}... directly for ${protocol}`);
+      return await this.node.dialProtocol(peerId, protocol, {
+        signal: AbortSignal.timeout(DIAL_TIMEOUT),
+      });
     } catch (directErr) {
-      log.debug(`Direct dial failed for ${peerId.slice(0, 12)}...: ${(directErr as Error).message}`);
+      log.debug(`Direct dial failed for ${shortId}...: ${(directErr as Error).message}`);
     }
 
-    // Try to find multiaddrs for this peer from NATS or DHT
+    // Try to find multiaddrs for this peer from DHT/directory
     const addrs = await this.resolveMultiaddrs(peerId);
     if (addrs.length === 0) {
-      throw new Error(`Cannot reach peer ${peerId.slice(0, 12)}...: no known multiaddrs (not in libp2p peer store, NATS, or DHT)`);
+      throw new Error(`Cannot reach peer ${shortId}...: no known multiaddrs (not in libp2p peer store, DHT, or directory)`);
     }
 
-    // Add the resolved addresses to libp2p's address book, then dial
+    log.debug(`Resolved ${addrs.length} multiaddrs for ${shortId}...: ${addrs.join(', ')}`);
+
+    // Try each resolved multiaddr with a timeout
+    const errors: string[] = [];
     for (const addr of addrs) {
-      try {
-        // libp2p's peerStore.merge adds addresses without overwriting
-        await this.node.peerStore?.merge?.(peerId, { multiaddrs: [addr] });
-      } catch {
-        // peerStore API varies — best effort
+      // Skip obviously undialable addrs
+      if (addr.includes('/0.0.0.0/') || addr.includes('/ip4/0.0.0.0/')) {
+        log.debug(`Skipping undialable addr: ${addr}`);
+        continue;
       }
-    }
 
-    // Try each multiaddr directly
-    for (const addr of addrs) {
       try {
         const addrWithPeer = addr.includes(`/p2p/${peerId}`) ? addr : `${addr}/p2p/${peerId}`;
-        return await this.node.dialProtocol(addrWithPeer, protocol);
-      } catch {
+        log.debug(`Trying ${addrWithPeer} for ${protocol}`);
+        return await this.node.dialProtocol(addrWithPeer, protocol, {
+          signal: AbortSignal.timeout(DIAL_TIMEOUT),
+        });
+      } catch (addrErr) {
+        errors.push(`${addr}: ${(addrErr as Error).message}`);
         continue;
       }
     }
 
-    throw new Error(`Cannot reach peer ${peerId.slice(0, 12)}...: all ${addrs.length} resolved multiaddrs failed`);
+    throw new Error(
+      `Cannot reach peer ${shortId}...: all ${addrs.length} resolved multiaddrs failed.\n` +
+      errors.map(e => `  - ${e}`).join('\n'),
+    );
   }
 
   /**
@@ -832,6 +844,19 @@ export class NexusClient {
    */
   private async resolveMultiaddrs(peerId: string): Promise<string[]> {
     const addrs: string[] = [];
+
+    // Check libp2p peer store first — may have addrs from mDNS/pubsub
+    try {
+      const peer = await this.node.peerStore?.get?.(peerId);
+      if (peer?.addresses) {
+        for (const addrInfo of peer.addresses) {
+          const str = addrInfo.multiaddr?.toString?.();
+          if (str) addrs.push(str);
+        }
+      }
+    } catch {
+      // peer not in store — expected
+    }
 
     // Check DHT profile
     try {

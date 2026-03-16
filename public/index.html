@@ -1267,8 +1267,8 @@ async function loadDirectory() {
   } catch { /* directory unavailable — NATS will handle it */ }
 }
 
-// Write accumulated NATS + directory state back to KV every 60s
-// This persists the view for the next visitor. Max 1 write/60s.
+// Write accumulated NATS + directory state back to KV every 5 minutes
+// This persists the view for the next visitor. Server rate-limits to 1 write/5min.
 function startDirectoryWriteback() {
   setInterval(async () => {
     if (natsAgents.size === 0 && knownAgents.size === 0) return;
@@ -1311,7 +1311,7 @@ function startDirectoryWriteback() {
         body: JSON.stringify(allAgents[0]), // post one agent at a time, worker aggregates
       });
     } catch { /* silent */ }
-  }, 60_000);
+  }, 300_000); // 5 minutes
 }
 
 // Initialise
@@ -1323,7 +1323,7 @@ loadDirectory();
 // 2. Fetch bootstrap + metrics
 fetchBootstrap().then(() => {
   fetchNetwork();
-  setInterval(fetchNetwork, 10000);
+  setInterval(fetchNetwork, 30_000); // 30s — KV is cached server-side, no need to hammer
 });
 
 // 3. Start KV writeback (1 write per 60s max)
@@ -1490,7 +1490,7 @@ async function fetchX402Status() {
 }
 
 fetchX402Status();
-setInterval(fetchX402Status, 60_000); // refresh every 60s
+setInterval(fetchX402Status, 300_000); // refresh every 5 minutes
 
 // ─────────────────────────────────────────────
 //  COPY INSTALL COMMAND

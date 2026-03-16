@@ -68,9 +68,43 @@ let metrics = {
   reportCount: 0,
 };
 
-// Rate limit: max 1 KV write per 60 seconds for directory snapshots
+// Rate limit: max 1 KV write per 5 minutes for directory snapshots
 let lastDirectoryWrite = 0;
-const DIRECTORY_WRITE_INTERVAL = 60_000;
+const DIRECTORY_WRITE_INTERVAL = 300_000; // 5 minutes (was 60s)
+
+// ---------------------------------------------------------------------------
+// In-memory KV cache — avoids hitting KV on every request.
+// Workers reuse the same isolate across requests within a deployment,
+// so a global cache is effective. TTL keeps data fresh enough.
+// ---------------------------------------------------------------------------
+const KV_CACHE_TTL = 60_000; // 60 seconds
+
+interface CacheEntry {
+  data: any;
+  expiry: number;
+}
+
+const kvCache = new Map<string, CacheEntry>();
+
+async function cachedKVGet(kv: KVNamespace, key: string): Promise<any> {
+  const now = Date.now();
+  const cached = kvCache.get(key);
+  if (cached && cached.expiry > now) {
+    return cached.data;
+  }
+
+  try {
+    const data = await kv.get(key, 'json');
+    kvCache.set(key, { data, expiry: now + KV_CACHE_TTL });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function invalidateCache(key: string): void {
+  kvCache.delete(key);
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -85,10 +119,8 @@ export default {
       // ── Bootstrap: hardcoded peers + any known agent addresses from KV ──
       case '/api/v1/bootstrap': {
         let knownAgents: string[] = [];
-        try {
-          const stored = await env.AGENTS.get('known-agents', 'json') as any;
-          if (stored?.addresses) knownAgents = stored.addresses;
-        } catch { /* KV miss is fine */ }
+        const stored = await cachedKVGet(env.AGENTS, 'known-agents') as any;
+        if (stored?.addresses) knownAgents = stored.addresses;
 
         // Merge: hardcoded public bootstrap + persisted known agents
         const allPeers = [...new Set([...PUBLIC_BOOTSTRAP, ...knownAgents])];
@@ -106,15 +138,14 @@ export default {
         });
       }
 
-      // ── Network state: in-memory metrics + KV snapshot ──
+      // ── Network state: in-memory metrics + cached KV snapshot ──
       case '/api/v1/network': {
-        let snapshot: any = null;
-        try {
-          snapshot = await env.AGENTS.get('network-snapshot', 'json');
-        } catch { /* miss is fine */ }
+        // Use the directory cache — snapshot data is now embedded in known-agents
+        const dir = await cachedKVGet(env.AGENTS, 'known-agents') as any;
+        const snapshot = dir?.snapshot;
 
         return json({
-          peerCount: metrics.totalPeers || snapshot?.peerCount || 0,
+          peerCount: metrics.totalPeers || snapshot?.peerCount || dir?.agents?.length || 0,
           roomCount: metrics.totalRooms || snapshot?.roomCount || 1,
           messageRate: metrics.messageRate,
           storageProviders: 0,
@@ -127,8 +158,8 @@ export default {
 
       // ── Room list ──
       case '/api/v1/rooms': {
-        let snapshot: any = null;
-        try { snapshot = await env.AGENTS.get('network-snapshot', 'json'); } catch {}
+        const dir = await cachedKVGet(env.AGENTS, 'known-agents') as any;
+        const snapshot = dir?.snapshot;
 
         return json({
           rooms: snapshot?.rooms || [{ roomId: 'general', name: 'general', topic: '/nexus/room/general', memberCount: 0, type: 'persistent', access: 'public', manifest: '' }],
@@ -156,13 +187,8 @@ export default {
       // Payload: { peerId, agentName, multiaddrs, rooms, nknAddress? }
       case '/api/v1/directory': {
         if (request.method === 'GET') {
-          // Read the directory
-          try {
-            const dir = await env.AGENTS.get('known-agents', 'json');
-            return json(dir || { addresses: [], agents: [], updatedAt: 0 });
-          } catch {
-            return json({ addresses: [], agents: [], updatedAt: 0 });
-          }
+          const dir = await cachedKVGet(env.AGENTS, 'known-agents');
+          return json(dir || { addresses: [], agents: [], updatedAt: 0 });
         }
 
         if (request.method !== 'POST') return json({ error: 'GET or POST' }, 405);
@@ -181,13 +207,8 @@ export default {
           return json({ ok: true, persisted: false, reason: 'rate-limited', nextWriteIn: DIRECTORY_WRITE_INTERVAL - (now - lastDirectoryWrite) });
         }
 
-        // Read existing directory
-        let existing: any;
-        try {
-          existing = await env.AGENTS.get('known-agents', 'json') || { addresses: [], agents: [] };
-        } catch {
-          existing = { addresses: [], agents: [] };
-        }
+        // Read existing directory from cache (avoids extra KV read)
+        const existing = await cachedKVGet(env.AGENTS, 'known-agents') || { addresses: [], agents: [] };
 
         // Build agent entry (minimal — no model info, no GPU, just addresses)
         const entry = {
@@ -210,18 +231,12 @@ export default {
         // Extract all multiaddrs for the bootstrap endpoint
         const allAddrs = capped.flatMap((a: any) => a.multiaddrs || []);
 
+        // Single KV object — directory + embedded snapshot (was 2 separate writes)
         const directory = {
           addresses: allAddrs,
           agents: capped,
           updatedAt: now,
-        };
-
-        // Write to KV — this is the only write, max once per 60s
-        try {
-          await env.AGENTS.put('known-agents', JSON.stringify(directory));
-
-          // Also snapshot network state
-          await env.AGENTS.put('network-snapshot', JSON.stringify({
+          snapshot: {
             peerCount: capped.length,
             roomCount: new Set(capped.flatMap((a: any) => a.rooms || [])).size || 1,
             rooms: Array.from(new Set(capped.flatMap((a: any) => a.rooms || ['general']))).map(r => ({
@@ -236,12 +251,20 @@ export default {
               nknAddress: a.nknAddress,
             })),
             updatedAt: now,
-          }));
+          },
+        };
+
+        // Single KV write — max once per 5 minutes
+        try {
+          await env.AGENTS.put('known-agents', JSON.stringify(directory));
+
+          // Update in-memory cache immediately
+          invalidateCache('known-agents');
+          kvCache.set('known-agents', { data: directory, expiry: Date.now() + KV_CACHE_TTL });
 
           lastDirectoryWrite = now;
           return json({ ok: true, persisted: true, agentsInDirectory: capped.length });
         } catch (kvErr) {
-          // KV write failed — return success with persisted: false so agent knows
           return json({ ok: true, persisted: false, reason: 'kv-write-error', error: String(kvErr) });
         }
       }

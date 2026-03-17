@@ -654,6 +654,35 @@ function addNode(label, index, total) {
   return node;
 }
 
+function removeNode(index) {
+  if (index < 0 || index >= nodes.length) return;
+  const nd = nodes[index];
+  // Remove Three.js objects from scene
+  nodeGroup.remove(nd.mesh);
+  nodeGroup.remove(nd.light);
+  nodeGroup.remove(nd.sprite);
+  nd.mesh.geometry?.dispose();
+  nd.mat?.dispose?.();
+  nd.sprite.material?.map?.dispose();
+  nd.sprite.material?.dispose();
+  // Remove connections that reference this node
+  for (let i = connections.length - 1; i >= 0; i--) {
+    if (connections[i].ia === index || connections[i].ib === index) {
+      connGroup.remove(connections[i].line);
+      connections[i].line.geometry?.dispose();
+      connections[i].line.material?.dispose();
+      connections[i].particles.forEach(p => {
+        particleGroup.remove(p.mesh);
+        p.mesh.geometry?.dispose();
+        p.mesh.material?.dispose();
+      });
+      connections.splice(i, 1);
+    }
+  }
+  // Null out the slot (don't splice — would break index references in knownAgents)
+  nodes[index] = null;
+}
+
 function addConnection(ia, ib) {
   if (ia >= nodes.length || ib >= nodes.length) return;
   const a = nodes[ia];
@@ -744,6 +773,7 @@ function animate() {
   if (now - lastInteract > 4000) controls.autoRotate = true;
 
   nodes.forEach((nd) => {
+    if (!nd) return; // removed node
     // Entrance scale-up
     if (now < nd.birthTime + 600) {
       const p    = Math.max(0, (now - nd.birthTime) / 600);
@@ -1160,7 +1190,7 @@ function reconcileAgents(networkData) {
 function blinkAllNodes() {
   const now = performance.now();
   nodes.forEach((nd, i) => {
-    // Stagger blinks slightly so they ripple
+    if (!nd) return;
     nd.blinkUntil = now + 400 + i * 30;
   });
 }
@@ -1289,7 +1319,49 @@ fetchBootstrap().then(() => {
 // ─────────────────────────────────────────────
 //  NATS BROWSER CONNECTION — live agent discovery
 // ─────────────────────────────────────────────
-const natsAgents = new Map(); // peerId -> announcement
+const natsAgents = new Map(); // peerId -> { ...announcement, lastSeen }
+const STALE_TIMEOUT = 90_000; // 90s — 3x the 30s announce interval
+
+// Sweep stale agents every 30s — remove agents not seen in 90s
+setInterval(() => {
+  const now = Date.now();
+  const stale = [];
+  for (const [peerId, entry] of natsAgents) {
+    if (now - (entry.lastSeen || 0) > STALE_TIMEOUT) {
+      stale.push(peerId);
+    }
+  }
+  for (const peerId of stale) {
+    const name = natsAgents.get(peerId)?.agentName || peerId.slice(0, 8);
+    natsAgents.delete(peerId);
+
+    // Remove from 3D scene
+    const agent = knownAgents.get(peerId);
+    if (agent) {
+      removeNode(agent.index);
+      knownAgents.delete(peerId);
+    }
+
+    // Remove sidebar card
+    const card = nodesList.querySelector(`[data-peer="${peerId}"]`);
+    if (card) card.remove();
+
+    // Update live agents dropdown count
+    const natsDropdown = document.getElementById('nats-agents-dropdown');
+    if (natsDropdown) {
+      const count = natsDropdown.querySelectorAll('.peer-card').length;
+      const summary = natsDropdown.querySelector('summary');
+      if (summary) summary.textContent = `live agents (${count})`;
+    }
+
+    pushLog(`<span style="color:#666">${name}</span> went offline`);
+  }
+
+  // Update dials if agents were removed
+  if (stale.length > 0) {
+    setDial('dial-peers-arc', 'dial-peers-val', (natsAgents.size / 100) * 100, String(natsAgents.size));
+  }
+}, 30_000);
 
 async function connectNats() {
   try {
@@ -1308,7 +1380,7 @@ async function connectNats() {
           if (ann.type !== 'nexus.announce' || !ann.peerId) continue;
 
           const isNew = !natsAgents.has(ann.peerId);
-          natsAgents.set(ann.peerId, ann);
+          natsAgents.set(ann.peerId, { ...ann, lastSeen: Date.now() });
 
           if (isNew) {
             const label = ann.agentName || ann.peerId.slice(0, 8);

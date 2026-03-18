@@ -29,6 +29,7 @@ import { mdns } from '@libp2p/mdns';
 import { ping } from '@libp2p/ping';
 import { circuitRelayTransport, circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { pubsubPeerDiscovery } from '@libp2p/pubsub-peer-discovery';
+import { peerIdFromString } from '@libp2p/peer-id';
 import type { PrivateKey } from '@libp2p/interface';
 import type { Message } from '@libp2p/gossipsub';
 import { msgIdFn as nexusMsgIdFn, PROTOCOLS } from './protocol/index.js';
@@ -83,7 +84,27 @@ export async function createNexusNode(
   // Build the combined bootstrap peer list from all sources
   // Merge config.bootstrapPeers (operator-supplied) into signalingPeers position
   const allSignalingPeers = [...signalingPeers, ...config.bootstrapPeers];
-  const bootstrapList = buildBootstrapList(discovery, allSignalingPeers);
+  const rawBootstrapList = buildBootstrapList(discovery, allSignalingPeers);
+
+  // Validate bootstrap peers — filter out any with malformed peer IDs that
+  // would cause @libp2p/bootstrap to throw "Incorrect length" and kill the node
+  const bootstrapList: string[] = [];
+  for (const addr of rawBootstrapList) {
+    const parts = addr.split('/p2p/');
+    if (parts.length < 2) {
+      // No peer ID in multiaddr — skip
+      continue;
+    }
+    try {
+      peerIdFromString(parts[parts.length - 1]);
+      bootstrapList.push(addr);
+    } catch {
+      log.debug(`Skipping invalid bootstrap peer: ${addr.slice(0, 80)}...`);
+    }
+  }
+  if (rawBootstrapList.length !== bootstrapList.length) {
+    log.info(`Bootstrap: filtered ${rawBootstrapList.length - bootstrapList.length} invalid peers (${bootstrapList.length} valid)`);
+  }
 
   // Build peer discovery modules
   const peerDiscovery: ReturnType<

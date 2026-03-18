@@ -36,6 +36,7 @@ import {
   STREAM_PROTOCOLS,
   encodeStreamMessage,
   decodeStreamMessage,
+  decodeStreamMessages,
   type InvokeOpen,
   type InvokeEvent,
   type InvokeMessage,
@@ -95,8 +96,12 @@ async function* streamReader(stream: any): AsyncGenerator<InvokeMessage | null> 
       const bytes = rawData instanceof Uint8Array
         ? rawData
         : (typeof rawData.subarray === 'function' ? rawData.subarray() : new Uint8Array(rawData.buffer ?? []));
-      const msg = decodeStreamMessage(bytes);
-      if (msg) yield msg;
+      // NDJSON-safe: a single read may contain multiple coalesced messages
+      // (e.g. invoke.open + invoke.chunk sent back-to-back by the caller)
+      const msgs = decodeStreamMessages(bytes);
+      for (const msg of msgs) {
+        yield msg;
+      }
     }
   } catch {
     // Stream closed or reset — normal
@@ -1357,6 +1362,7 @@ export {
   CHAT_SYNC_PROTOCOL,
   encodeStreamMessage,
   decodeStreamMessage,
+  decodeStreamMessages,
 } from './protocols/index.js';
 export type {
   InvokeOpen,

@@ -136,18 +136,51 @@ export function encodeStreamMessage(msg: InvokeMessage): Uint8Array {
 }
 
 /**
- * Decode an InvokeMessage from stream data.
- * Returns null if the data is empty, whitespace-only, or unparseable.
+ * Decode one or more InvokeMessages from stream data.
+ * Handles NDJSON: when TCP/yamux coalesces multiple send() calls into a single
+ * chunk, the buffer contains multiple JSON objects separated by newlines.
+ * Returns an array of decoded messages (empty if none could be parsed).
  */
-export function decodeStreamMessage(data: Uint8Array): InvokeMessage | null {
+export function decodeStreamMessages(data: Uint8Array): InvokeMessage[] {
   try {
     const text = new TextDecoder().decode(data).trim();
-    if (!text) return null;
-    return JSON.parse(text) as InvokeMessage;
+    if (!text) return [];
+
+    // Fast path: single message (most common case)
+    if (!text.includes('\n')) {
+      try {
+        return [JSON.parse(text) as InvokeMessage];
+      } catch {
+        log.debug('decodeStreamMessages: failed to parse single message');
+        return [];
+      }
+    }
+
+    // NDJSON: split on newlines and parse each line
+    const messages: InvokeMessage[] = [];
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        messages.push(JSON.parse(trimmed) as InvokeMessage);
+      } catch {
+        log.debug(`decodeStreamMessages: failed to parse line: ${trimmed.slice(0, 80)}`);
+      }
+    }
+    return messages;
   } catch {
-    log.debug('decodeStreamMessage: failed to parse message');
-    return null;
+    log.debug('decodeStreamMessages: failed to decode data');
+    return [];
   }
+}
+
+/**
+ * Decode an InvokeMessage from stream data (single message).
+ * @deprecated Use decodeStreamMessages() for NDJSON-safe decoding.
+ */
+export function decodeStreamMessage(data: Uint8Array): InvokeMessage | null {
+  const msgs = decodeStreamMessages(data);
+  return msgs[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------

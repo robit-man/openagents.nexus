@@ -899,9 +899,9 @@ function updateRoomBubbles() {
     }
   }
 
-  // Create/update bubbles for rooms with 2+ visible members
+  // Create/update bubbles for rooms with 1+ visible members
   for (const [roomId, members] of roomMembers) {
-    if (members.length < 2) {
+    if (members.length < 1) {
       removeBubble(roomId);
       continue;
     }
@@ -1002,7 +1002,7 @@ function updateRoomBubbles() {
 
   // Remove bubbles for rooms no longer present
   for (const [roomId] of roomBubbles) {
-    if (!roomMembers.has(roomId) || (roomMembers.get(roomId)?.length || 0) < 2) {
+    if (!roomMembers.has(roomId) || (roomMembers.get(roomId)?.length || 0) < 1) {
       removeBubble(roomId);
     }
   }
@@ -1218,7 +1218,7 @@ function stepSimulation() {
 
   // 3.5. Room clustering — pull members into polyp clusters, push cluster outward
   for (const [, bubble] of roomBubbles) {
-    if (bubble.members.size < 2) continue;
+    if (bubble.members.size < 1) continue;
 
     // Compute room centroid
     _tmpCentroid.set(0, 0, 0);
@@ -1470,21 +1470,23 @@ function animate() {
 
   // ── Update room bubbles ──
   roomBubbles.forEach((bubble, roomId) => {
-    if (bubble.members.size < 2) return;
+    if (bubble.members.size < 1) return;
 
-    // Compute centroid + max radius from member nodes (reuse temp vector)
+    // Compute centroid from member nodes — creator (first member) is anchored at center
     _tmpCentroid.set(0, 0, 0);
     let count = 0;
     let maxDist = 0;
+    let creatorIdx = -1;
 
     for (const [, nodeIndex] of bubble.members) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
+      if (creatorIdx === -1) creatorIdx = nodeIndex; // first member = creator
       _tmpCentroid.add(nd.pos);
       count++;
     }
 
-    if (count < 2) return;
+    if (count < 1) return;
     _tmpCentroid.divideScalar(count);
 
     for (const [, nodeIndex] of bubble.members) {
@@ -1565,27 +1567,24 @@ function animate() {
     bubble.labelSprite.position.y += radius + 0.6;
     bubble.labelSprite.material.opacity = 0.4;
 
-    // Umbilical spline: curved cord from origin to room sphere surface
+    // Umbilical spline: curved cord from origin to room creator node
     if (bubble.umbilical) {
       const umb = bubble.umbilical;
-      const centDist = _tmpCentroid.length();
+      // End at creator node position (center of the room)
+      const creatorNd = creatorIdx >= 0 ? nodes[creatorIdx] : null;
+      const endPos = creatorNd ? creatorNd.pos : _tmpCentroid;
+      const centDist = endPos.length();
       umb.curve.v0.set(0, 0, 0);
-      // End on the sphere boundary facing the origin, not the center
-      if (centDist > 0.01) {
-        _tmpDir.copy(_tmpCentroid).normalize();
-        umb.curve.v3.copy(_tmpCentroid).addScaledVector(_tmpDir, -radius);
-      } else {
-        umb.curve.v3.copy(_tmpCentroid);
-      }
+      umb.curve.v3.copy(endPos);
       // Control points: gentle arc with perpendicular offset
-      const perpAngle = Math.atan2(_tmpCentroid.z, _tmpCentroid.x) + Math.PI * 0.3;
+      const perpAngle = Math.atan2(endPos.z, endPos.x) + Math.PI * 0.3;
       const arcH = centDist * 0.2;
       umb.curve.v1.set(
         Math.cos(perpAngle) * centDist * 0.2,
         arcH,
         Math.sin(perpAngle) * centDist * 0.2
       );
-      umb.curve.v2.copy(_tmpCentroid).multiplyScalar(0.6);
+      umb.curve.v2.copy(endPos).multiplyScalar(0.6);
       umb.curve.v2.y += arcH * 0.5;
 
       // Write curve to pre-allocated buffer

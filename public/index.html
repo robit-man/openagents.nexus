@@ -994,6 +994,7 @@ function updateRoomBubbles() {
         const newGeo = new THREE.IcosahedronGeometry(1, newDetail);
         bubble.mesh.geometry = newGeo;
         bubble.wireMesh.geometry = newGeo;
+        bubble._basePositions = null; // reset pristine snapshot for new geometry
         oldGeo?.dispose();
       }
     }
@@ -1447,12 +1448,68 @@ function animate() {
     // Bubble radius with padding
     const radius = maxDist + 1.8;
 
-    // Position + scale with subtle pulse
+    // ── Oblate node-driven envelope ──
+    // Displace each vertex radially based on proximity to internal nodes.
+    // Vertices near nodes bulge out; vertices away from nodes pull inward.
     const pulse = 1.0 + Math.sin(now * 0.0008) * 0.008;
     bubble.mesh.position.copy(_tmpCentroid);
-    bubble.mesh.scale.setScalar(radius * pulse);
+    bubble.mesh.scale.setScalar(1); // vertex positions set directly
     bubble.wireMesh.position.copy(_tmpCentroid);
-    bubble.wireMesh.scale.setScalar(radius * pulse);
+    bubble.wireMesh.scale.setScalar(1);
+
+    const posAttr = bubble.mesh.geometry.attributes.position;
+    const baseGeo = bubble._basePositions;
+    // Lazily snapshot pristine unit-sphere vertex directions on first frame
+    if (!baseGeo) {
+      bubble._basePositions = new Float32Array(posAttr.array);
+    }
+    const origArr = bubble._basePositions || posAttr.array;
+    const arr = posAttr.array;
+
+    // Collect node offsets relative to centroid
+    const memberOffsets = [];
+    for (const [, nodeIndex] of bubble.members) {
+      const nd = nodes[nodeIndex];
+      if (!nd) continue;
+      memberOffsets.push(
+        nd.pos.x - _tmpCentroid.x,
+        nd.pos.y - _tmpCentroid.y,
+        nd.pos.z - _tmpCentroid.z
+      );
+    }
+
+    const minR = radius * 0.55;  // minimum radius (oblate inward pull)
+    for (let vi = 0; vi < arr.length; vi += 3) {
+      // Unit direction of this vertex on the base icosahedron
+      const dx = origArr[vi], dy = origArr[vi + 1], dz = origArr[vi + 2];
+      const dLen = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      const nx = dx / dLen, ny = dy / dLen, nz = dz / dLen;
+
+      // Find max projection of member offsets onto this vertex direction
+      // This makes the envelope bulge toward where nodes actually are
+      let maxProj = 0;
+      for (let mi = 0; mi < memberOffsets.length; mi += 3) {
+        const proj = memberOffsets[mi] * nx + memberOffsets[mi + 1] * ny + memberOffsets[mi + 2] * nz;
+        // Also consider lateral proximity — nodes near this direction
+        const crossX = memberOffsets[mi] - proj * nx;
+        const crossY = memberOffsets[mi + 1] - proj * ny;
+        const crossZ = memberOffsets[mi + 2] - proj * nz;
+        const lateralDist = Math.sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+        // Influence falls off with lateral distance
+        const influence = Math.max(0, proj) / (1 + lateralDist * 0.5);
+        if (influence > maxProj) maxProj = influence;
+      }
+
+      // Vertex radius: blend between minR (no nodes nearby) and full radius (node nearby)
+      const nodeInfluence = Math.min(1, maxProj / (maxDist || 1));
+      const vtxRadius = (minR + (radius - minR) * (0.4 + nodeInfluence * 0.6)) * pulse;
+      arr[vi]     = nx * vtxRadius;
+      arr[vi + 1] = ny * vtxRadius;
+      arr[vi + 2] = nz * vtxRadius;
+    }
+    posAttr.needsUpdate = true;
+    bubble.mesh.geometry.computeVertexNormals();
+    // Wireframe shares geometry — already updated
 
     // Room label above the bubble
     bubble.labelSprite.position.copy(_tmpCentroid);

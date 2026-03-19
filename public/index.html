@@ -925,6 +925,18 @@ function updateRoomBubbles() {
       mesh.renderOrder = -1;
       roomGroup.add(mesh);
 
+      // Wireframe overlay — emissive edges show icosahedron structure
+      const wireMat = new THREE.MeshBasicMaterial({
+        color: 0x667788,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+      });
+      const wireMesh = new THREE.Mesh(bubbleGeo, wireMat);
+      wireMesh.renderOrder = -1;
+      roomGroup.add(wireMesh);
+
       // Room label sprite
       const labelSprite = makeRoomLabel(roomId);
       roomGroup.add(labelSprite);
@@ -963,6 +975,7 @@ function updateRoomBubbles() {
 
       roomBubbles.set(roomId, {
         mesh,
+        wireMesh,
         labelSprite,
         members: new Map(members.map(m => [m.peerId, m.nodeIndex])),
         messages: [],
@@ -978,7 +991,9 @@ function updateRoomBubbles() {
       if (bubble._detail !== newDetail) {
         bubble._detail = newDetail;
         const oldGeo = bubble.mesh.geometry;
-        bubble.mesh.geometry = new THREE.IcosahedronGeometry(1, newDetail);
+        const newGeo = new THREE.IcosahedronGeometry(1, newDetail);
+        bubble.mesh.geometry = newGeo;
+        bubble.wireMesh.geometry = newGeo;
         oldGeo?.dispose();
       }
     }
@@ -996,9 +1011,11 @@ function removeBubble(roomId) {
   const bubble = roomBubbles.get(roomId);
   if (!bubble) return;
   roomGroup.remove(bubble.mesh);
+  roomGroup.remove(bubble.wireMesh);
   roomGroup.remove(bubble.labelSprite);
   bubble.mesh.geometry?.dispose(); // per-room adaptive geometry — dispose
   bubble.mesh.material?.dispose();
+  bubble.wireMesh.material?.dispose();
   bubble.labelSprite.material?.map?.dispose();
   bubble.labelSprite.material?.dispose();
   // Clean up umbilical
@@ -1419,6 +1436,8 @@ function animate() {
     const pulse = 1.0 + Math.sin(now * 0.0008) * 0.008;
     bubble.mesh.position.copy(_tmpCentroid);
     bubble.mesh.scale.setScalar(radius * pulse);
+    bubble.wireMesh.position.copy(_tmpCentroid);
+    bubble.wireMesh.scale.setScalar(radius * pulse);
 
     // Room label above the bubble
     bubble.labelSprite.position.copy(_tmpCentroid);

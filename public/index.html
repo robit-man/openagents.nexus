@@ -630,6 +630,97 @@ const ROOM_SIM = {
 const COMM_DECAY = 0.97;          // rate decay per frame (~60fps → ~6s half-life)
 const COMM_BOOST = 3.0;           // boost per message event
 
+// ── Room detail levels — adaptive resolution based on participant count ──
+const ROOM_DETAIL = { SMALL: 1, MEDIUM: 2, LARGE: 3 };
+function getRoomDetail(memberCount) {
+  if (memberCount <= 3) return ROOM_DETAIL.SMALL;   // 80 faces
+  if (memberCount <= 6) return ROOM_DETAIL.MEDIUM;  // 320 faces
+  return ROOM_DETAIL.LARGE;                          // 1280 faces
+}
+
+// ── Central core icosahedron — violently undulating light emitter ──
+const coreIcoGeo = new THREE.IcosahedronGeometry(0.5, 2);
+const coreIcoMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  emissive: new THREE.Color(0xffffff),
+  emissiveIntensity: 1.8,
+  roughness: 0.05,
+  metalness: 0.95,
+  transparent: true,
+  opacity: 0.95,
+});
+const coreIco = new THREE.Mesh(coreIcoGeo, coreIcoMat);
+scene.add(coreIco);
+const coreOrigPositions = new Float32Array(coreIcoGeo.attributes.position.array);
+let sceneActivity = 0;
+
+function undulateCore(time) {
+  let totalComm = 0;
+  for (const c of connections) totalComm += c.commRate;
+  const targetActivity = Math.min(1, totalComm / 10 + nodes.length * 0.015);
+  sceneActivity += (targetActivity - sceneActivity) * 0.04;
+
+  const posAttr = coreIcoGeo.attributes.position;
+  const arr = posAttr.array;
+  const t = time * 0.001;
+  const intensity = 0.1 + sceneActivity * 0.5;
+
+  for (let i = 0; i < arr.length; i += 3) {
+    const ox = coreOrigPositions[i];
+    const oy = coreOrigPositions[i + 1];
+    const oz = coreOrigPositions[i + 2];
+    const n1 = Math.sin(ox * 4.1 + t * 2.7) * Math.cos(oy * 3.3 + t * 1.9);
+    const n2 = Math.sin(oz * 5.7 + t * 3.3) * Math.sin(ox * 2.1 + t * 3.7);
+    const n3 = Math.cos(oy * 7.3 + t * 5.1) * Math.sin(oz * 4.7 + t * 1.1);
+    const displacement = (n1 + n2 + n3) * intensity;
+    arr[i]     = ox * (1 + displacement);
+    arr[i + 1] = oy * (1 + displacement * 1.3);
+    arr[i + 2] = oz * (1 + displacement * 0.8);
+  }
+  posAttr.needsUpdate = true;
+  coreIcoGeo.computeVertexNormals();
+
+  coreIcoMat.emissiveIntensity = 1.0 + sceneActivity * 3.0;
+  coreIco.rotation.x += 0.004 + sceneActivity * 0.012;
+  coreIco.rotation.y += 0.006 + sceneActivity * 0.018;
+}
+
+// ── TextSprite — enhanced text display for bubble surface messages ──
+function TextSprite(text, opts = {}) {
+  const cv = document.createElement('canvas');
+  cv.width = opts.width || 512;
+  cv.height = opts.height || 64;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const fontSize = opts.fontSize || 14;
+  ctx.font = (opts.bold ? 'bold ' : '') + fontSize + 'px Courier New';
+  const textWidth = Math.min(ctx.measureText(text).width + 16, cv.width - 8);
+  const pillH = fontSize + 10;
+  const pillY = (cv.height - pillH) / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(4, pillY, textWidth, pillH, 4);
+    ctx.fill();
+  } else {
+    ctx.fillRect(4, pillY, textWidth, pillH);
+  }
+  ctx.fillStyle = opts.color || 'rgba(255,255,255,0.95)';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  let display = text;
+  if (ctx.measureText(text).width > cv.width - 24) {
+    while (ctx.measureText(display + '...').width > cv.width - 24 && display.length > 0) display = display.slice(0, -1);
+    display += '...';
+  }
+  ctx.fillText(display, 12, cv.height / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(opts.scaleX || 3.5, opts.scaleY || 0.44, 1);
+  return spr;
+}
+
 function makeLabelSprite(text) {
   const cv  = document.createElement('canvas');
   cv.width  = 256;
@@ -807,15 +898,25 @@ function updateRoomBubbles() {
     }
 
     if (!roomBubbles.has(roomId)) {
-      // Create translucent faceted bubble (IcosahedronGeometry — 80 faces, lightweight)
-      const mat = new THREE.MeshBasicMaterial({
+      // Create translucent reflective bubble — detail scales with member count
+      const detail = getRoomDetail(members.length);
+      const bubbleGeo = new THREE.IcosahedronGeometry(1, detail);
+      const mat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: 0.035,
+        opacity: 0.07,
+        transmission: 0.92,
+        roughness: 0.08,
+        metalness: 0.15,
+        ior: 1.4,
+        thickness: 0.3,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.05,
         side: THREE.DoubleSide,
         depthWrite: false,
+        envMapIntensity: 2.0,
       });
-      const mesh = new THREE.Mesh(SHARED_BUBBLE_GEO, mat);
+      const mesh = new THREE.Mesh(bubbleGeo, mat);
       mesh.renderOrder = -1;
       roomGroup.add(mesh);
 
@@ -856,10 +957,19 @@ function updateRoomBubbles() {
         messages: [],
         messageSprites: [],
         umbilical: { line: umbLine, curve: umbCurve, particles: umbParticles },
+        _detail: detail,
       });
     } else {
       const bubble = roomBubbles.get(roomId);
       bubble.members = new Map(members.map(m => [m.peerId, m.nodeIndex]));
+      // Adapt geometry detail if member count changed tier
+      const newDetail = getRoomDetail(members.length);
+      if (bubble._detail !== newDetail) {
+        bubble._detail = newDetail;
+        const oldGeo = bubble.mesh.geometry;
+        bubble.mesh.geometry = new THREE.IcosahedronGeometry(1, newDetail);
+        oldGeo?.dispose();
+      }
     }
   }
 
@@ -876,7 +986,8 @@ function removeBubble(roomId) {
   if (!bubble) return;
   roomGroup.remove(bubble.mesh);
   roomGroup.remove(bubble.labelSprite);
-  bubble.mesh.material?.dispose(); // geometry is shared — don't dispose
+  bubble.mesh.geometry?.dispose(); // per-room adaptive geometry — dispose
+  bubble.mesh.material?.dispose();
   bubble.labelSprite.material?.map?.dispose();
   bubble.labelSprite.material?.dispose();
   // Clean up umbilical
@@ -980,9 +1091,9 @@ function addRoomMessage(roomId, peerId, agentName, content) {
     oldest.line.material?.dispose();
   }
 
-  // Create sprite
+  // Create sprite — enhanced TextSprite for bubble surface visibility
   const displayText = agentName + ': ' + content;
-  const sprite = makeChatSprite(displayText);
+  const sprite = TextSprite(displayText, { bold: true, fontSize: 13 });
   roomGroup.add(sprite);
 
   // Create line from message to sender node (pre-allocated 2-point buffer)
@@ -1337,8 +1448,8 @@ function animate() {
         continue;
       }
 
-      entry.sprite.material.opacity = opacity * 0.85;
-      entry.line.material.opacity = opacity * 0.12;
+      entry.sprite.material.opacity = opacity * 0.95;
+      entry.line.material.opacity = opacity * 0.18;
 
       // Place on the outer surface, spread vertically (reuse temp vector)
       const slot = i / Math.max(1, spriteCount - 1);
@@ -1367,6 +1478,9 @@ function animate() {
       }
     }
   });
+
+  // ── Undulate core icosahedron with scene activity ──
+  undulateCore(now);
 
   controls.update();
   composer.render();

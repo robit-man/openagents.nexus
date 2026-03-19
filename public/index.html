@@ -617,11 +617,11 @@ const COMM_DECAY = 0.97;          // rate decay per frame (~60fps → ~6s half-l
 const COMM_BOOST = 3.0;           // boost per message event
 
 // ── Room detail levels — adaptive resolution based on participant count ──
-const ROOM_DETAIL = { SMALL: 1, MEDIUM: 2, LARGE: 3 };
+const ROOM_DETAIL = { MINIMAL: 0, SMALL: 1, MEDIUM: 2 };
 function getRoomDetail(memberCount) {
-  if (memberCount <= 3) return ROOM_DETAIL.SMALL;   // 80 faces
-  if (memberCount <= 6) return ROOM_DETAIL.MEDIUM;  // 320 faces
-  return ROOM_DETAIL.LARGE;                          // 1280 faces
+  if (memberCount <= 1) return ROOM_DETAIL.MINIMAL;  // 20 faces — sparse icosahedron
+  if (memberCount <= 4) return ROOM_DETAIL.SMALL;    // 80 faces
+  return ROOM_DETAIL.MEDIUM;                          // 320 faces
 }
 
 // ── Central core icosahedron — violently undulating light emitter ──

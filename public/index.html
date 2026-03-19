@@ -1444,12 +1444,18 @@ function animate() {
     bubble.labelSprite.position.y += radius + 0.6;
     bubble.labelSprite.material.opacity = 0.4;
 
-    // Umbilical spline: curved cord from origin to room centroid
+    // Umbilical spline: curved cord from origin to room sphere surface
     if (bubble.umbilical) {
       const umb = bubble.umbilical;
       const centDist = _tmpCentroid.length();
       umb.curve.v0.set(0, 0, 0);
-      umb.curve.v3.copy(_tmpCentroid);
+      // End on the sphere boundary facing the origin, not the center
+      if (centDist > 0.01) {
+        _tmpDir.copy(_tmpCentroid).normalize();
+        umb.curve.v3.copy(_tmpCentroid).addScaledVector(_tmpDir, -radius);
+      } else {
+        umb.curve.v3.copy(_tmpCentroid);
+      }
       // Control points: gentle arc with perpendicular offset
       const perpAngle = Math.atan2(_tmpCentroid.z, _tmpCentroid.x) + Math.PI * 0.3;
       const arcH = centDist * 0.2;

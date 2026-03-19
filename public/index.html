@@ -615,6 +615,20 @@ const _tmpMid     = new THREE.Vector3();
 const _tmpMid2    = new THREE.Vector3();
 const _tmpCentroid = new THREE.Vector3();
 const _tmpOffset  = new THREE.Vector3();
+const _tmpDir     = new THREE.Vector3();
+
+// ── Room clustering: nodes in rooms are pulled into satellite polyp spheres ──
+const ROOM_SIM = {
+  CLUSTER_PULL:  0.035,   // pull room members toward room centroid
+  OUTWARD_PUSH:  0.015,   // push room centroid away from main sphere
+  POLYP_DIST:    10.0,    // target distance of room center from origin
+  COMPACT_REST:  1.5,     // tighter rest length within room clusters
+};
+
+// ── Inference communication tracking ──
+// Tracks message rate per connection for visual modulation
+const COMM_DECAY = 0.97;          // rate decay per frame (~60fps → ~6s half-life)
+const COMM_BOOST = 3.0;           // boost per message event
 
 function makeLabelSprite(text) {
   const cv  = document.createElement('canvas');
@@ -744,7 +758,7 @@ function addConnection(ia, ib, weight) {
     particles.push({ mesh: pmesh, t: (p / particleCount), speed: 0.003 + (ib % 5) * 0.001 });
   }
 
-  connections.push({ curve, line, particles, ia, ib, weight: w });
+  connections.push({ curve, line, particles, ia, ib, weight: w, commRate: 0 });
 }
 
 function buildConnections() {
@@ -809,12 +823,39 @@ function updateRoomBubbles() {
       const labelSprite = makeRoomLabel(roomId);
       roomGroup.add(labelSprite);
 
+      // Umbilical spline: curved connection from origin to room centroid
+      const umbGeo = new THREE.BufferGeometry();
+      const umbArr = new Float32Array((LINE_SEGMENTS + 1) * 3);
+      umbGeo.setAttribute('position', new THREE.BufferAttribute(umbArr, 3));
+      umbGeo.setDrawRange(0, LINE_SEGMENTS + 1);
+      const umbMat = new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.06, depthWrite: false,
+      });
+      const umbLine = new THREE.Line(umbGeo, umbMat);
+      roomGroup.add(umbLine);
+
+      // Flowing particles along the umbilical
+      const umbParticles = [];
+      for (let p = 0; p < 3; p++) {
+        const pmat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+        const pmesh = new THREE.Mesh(SHARED_PARTICLE_GEO, pmat);
+        pmesh.renderOrder = 1;
+        roomGroup.add(pmesh);
+        umbParticles.push({ mesh: pmesh, t: p / 3, speed: 0.005 });
+      }
+
+      const umbCurve = new THREE.CubicBezierCurve3(
+        new THREE.Vector3(), new THREE.Vector3(),
+        new THREE.Vector3(), new THREE.Vector3()
+      );
+
       roomBubbles.set(roomId, {
         mesh,
         labelSprite,
         members: new Map(members.map(m => [m.peerId, m.nodeIndex])),
         messages: [],
         messageSprites: [],
+        umbilical: { line: umbLine, curve: umbCurve, particles: umbParticles },
       });
     } else {
       const bubble = roomBubbles.get(roomId);
@@ -838,6 +879,16 @@ function removeBubble(roomId) {
   bubble.mesh.material?.dispose(); // geometry is shared — don't dispose
   bubble.labelSprite.material?.map?.dispose();
   bubble.labelSprite.material?.dispose();
+  // Clean up umbilical
+  if (bubble.umbilical) {
+    roomGroup.remove(bubble.umbilical.line);
+    bubble.umbilical.line.geometry?.dispose();
+    bubble.umbilical.line.material?.dispose();
+    bubble.umbilical.particles.forEach(p => {
+      roomGroup.remove(p.mesh);
+      p.mesh.material?.dispose();
+    });
+  }
   bubble.messageSprites.forEach(entry => {
     roomGroup.remove(entry.sprite);
     roomGroup.remove(entry.line);
@@ -888,9 +939,31 @@ function makeChatSprite(text) {
   return spr;
 }
 
+// Boost commRate on connections between a sender and all room members
+function boostCommRate(senderPeerId, roomId) {
+  const bubble = roomBubbles.get(roomId);
+  if (!bubble) return;
+  // Find sender's node index
+  const senderIdx = bubble.members.get(senderPeerId);
+  if (senderIdx === undefined) return;
+  // Boost all connections touching this sender within the room
+  for (const [, memberIdx] of bubble.members) {
+    if (memberIdx === senderIdx) continue;
+    for (const conn of connections) {
+      if ((conn.ia === senderIdx && conn.ib === memberIdx) ||
+          (conn.ia === memberIdx && conn.ib === senderIdx)) {
+        conn.commRate += COMM_BOOST;
+      }
+    }
+  }
+}
+
 function addRoomMessage(roomId, peerId, agentName, content) {
   const bubble = roomBubbles.get(roomId);
   if (!bubble) return;
+
+  // Boost inference visualization on connections for this sender
+  boostCommRate(peerId, roomId);
 
   const msg = { peerId, agentName, content, timestamp: Date.now() };
   bubble.messages.push(msg);
@@ -985,6 +1058,48 @@ function stepSimulation() {
       activeNodes[i]._force.add(
         _tmpForce.copy(nd.pos).normalize().multiplyScalar(-pushBack)
       );
+    }
+  }
+
+  // 3.5. Room clustering — pull members into polyp clusters, push cluster outward
+  for (const [, bubble] of roomBubbles) {
+    if (bubble.members.size < 2) continue;
+
+    // Compute room centroid
+    _tmpCentroid.set(0, 0, 0);
+    let memberCount = 0;
+    for (const [, nodeIndex] of bubble.members) {
+      const nd = nodes[nodeIndex];
+      if (!nd) continue;
+      _tmpCentroid.add(nd.pos);
+      memberCount++;
+    }
+    if (memberCount < 2) continue;
+    _tmpCentroid.divideScalar(memberCount);
+
+    // Pull each member toward room centroid (clustering force)
+    for (const [, nodeIndex] of bubble.members) {
+      const nd = nodes[nodeIndex];
+      if (!nd) continue;
+      _tmpDelta.subVectors(_tmpCentroid, nd.pos);
+      const dist = _tmpDelta.length();
+      if (dist > 0.1) {
+        _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(ROOM_SIM.CLUSTER_PULL * dist);
+        nd._force.add(_tmpForce);
+      }
+    }
+
+    // Push room centroid outward from origin (polyp separation)
+    const centroidDist = _tmpCentroid.length();
+    if (centroidDist > 0.1 && centroidDist < ROOM_SIM.POLYP_DIST) {
+      _tmpDir.copy(_tmpCentroid).normalize();
+      const pushMag = (ROOM_SIM.POLYP_DIST - centroidDist) * ROOM_SIM.OUTWARD_PUSH;
+      for (const [, nodeIndex] of bubble.members) {
+        const nd = nodes[nodeIndex];
+        if (!nd) continue;
+        _tmpForce.copy(_tmpDir).multiplyScalar(pushMag);
+        nd._force.add(_tmpForce);
+      }
     }
   }
 
@@ -1101,15 +1216,24 @@ function animate() {
 
     // Fade connections with the dimmest connected node
     const connOpacity = Math.min(a.fadeOpacity, b.fadeOpacity);
-    c.line.material.opacity = ((c.ia + c.ib) % 4 === 0 ? 0.35 : 0.18) * connOpacity;
+    const baseOpacity = (c.ia + c.ib) % 4 === 0 ? 0.35 : 0.18;
+
+    // Comm rate modulation: active inference → brighter line + faster particles
+    c.commRate *= COMM_DECAY;
+    const commIntensity = Math.min(1, c.commRate / 5); // 0-1 intensity
+    c.line.material.opacity = (baseOpacity + commIntensity * 0.4) * connOpacity;
 
     c.particles.forEach(p => {
-      p.t += p.speed;
+      // Base speed + comm boost (up to 3x faster during active inference)
+      p.t += p.speed * (1 + commIntensity * 2);
       if (p.t > 1) p.t -= 1;
-      const pos  = c.curve.getPoint(p.t);
-      p.mesh.position.copy(pos);
+      c.curve.getPoint(p.t, _tmpOffset);
+      p.mesh.position.copy(_tmpOffset);
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
-      p.mesh.material.opacity = (0.45 + 0.5 * wave) * connOpacity;
+      // Brighter particles during active communication
+      p.mesh.material.opacity = (0.45 + 0.5 * wave + commIntensity * 0.4) * connOpacity;
+      // Scale up particles during inference burst
+      p.mesh.scale.setScalar(1 + commIntensity * 1.5);
     });
   });
 
@@ -1151,6 +1275,46 @@ function animate() {
     bubble.labelSprite.position.copy(_tmpCentroid);
     bubble.labelSprite.position.y += radius + 0.6;
     bubble.labelSprite.material.opacity = 0.4;
+
+    // Umbilical spline: curved cord from origin to room centroid
+    if (bubble.umbilical) {
+      const umb = bubble.umbilical;
+      const centDist = _tmpCentroid.length();
+      umb.curve.v0.set(0, 0, 0);
+      umb.curve.v3.copy(_tmpCentroid);
+      // Control points: gentle arc with perpendicular offset
+      const perpAngle = Math.atan2(_tmpCentroid.z, _tmpCentroid.x) + Math.PI * 0.3;
+      const arcH = centDist * 0.2;
+      umb.curve.v1.set(
+        Math.cos(perpAngle) * centDist * 0.2,
+        arcH,
+        Math.sin(perpAngle) * centDist * 0.2
+      );
+      umb.curve.v2.copy(_tmpCentroid).multiplyScalar(0.6);
+      umb.curve.v2.y += arcH * 0.5;
+
+      // Write curve to pre-allocated buffer
+      const uAttr = umb.line.geometry.attributes.position;
+      const uArr = uAttr.array;
+      for (let s = 0; s <= LINE_SEGMENTS; s++) {
+        umb.curve.getPoint(s / LINE_SEGMENTS, _tmpOffset);
+        const o = s * 3;
+        uArr[o]     = _tmpOffset.x;
+        uArr[o + 1] = _tmpOffset.y;
+        uArr[o + 2] = _tmpOffset.z;
+      }
+      uAttr.needsUpdate = true;
+
+      // Animate umbilical particles (flow from main sphere to room)
+      umb.particles.forEach(p => {
+        p.t += p.speed;
+        if (p.t > 1) p.t -= 1;
+        umb.curve.getPoint(p.t, _tmpOffset);
+        p.mesh.position.copy(_tmpOffset);
+        const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
+        p.mesh.material.opacity = 0.15 + 0.25 * wave;
+      });
+    }
 
     // Position message sprites on the outer boundary, distributed vertically
     const spriteCount = bubble.messageSprites.length;
@@ -1822,6 +1986,27 @@ async function connectNats() {
 
     // Also subscribe to presence
     nc.subscribe('nexus.agents.presence');
+
+    // Subscribe to inference activity (token rate events between peers)
+    const inferSub = nc.subscribe('nexus.inference.activity');
+    (async () => {
+      for await (const msg of inferSub) {
+        try {
+          const ev = JSON.parse(sc.decode(msg.data));
+          if (!ev.fromPeer || !ev.toPeer) continue;
+          // Find connections between these peers and boost commRate
+          const fromAgent = knownAgents.get(ev.fromPeer);
+          const toAgent = knownAgents.get(ev.toPeer);
+          if (!fromAgent || !toAgent) continue;
+          for (const conn of connections) {
+            if ((conn.ia === fromAgent.index && conn.ib === toAgent.index) ||
+                (conn.ia === toAgent.index && conn.ib === fromAgent.index)) {
+              conn.commRate += (ev.tokensPerSec || 1) * 0.1;
+            }
+          }
+        } catch { /* ignore malformed */ }
+      }
+    })().catch(() => {});
 
     // Subscribe to public room chat messages
     const chatSub = nc.subscribe('nexus.rooms.chat');

@@ -544,23 +544,7 @@ composer.addPass(bloomPass);
 
 scene.add(new THREE.AmbientLight(0x111111, 1));
 
-// ─────────────────────────────────────────────
-//  STAR FIELD
-// ─────────────────────────────────────────────
-(function buildStars() {
-  const count = 1400;
-  const geo   = new THREE.BufferGeometry();
-  const pos   = new Float32Array(count * 3);
-  // Use a seeded-ish approach: deterministic enough, no simulation dependency
-  for (let i = 0; i < count; i++) {
-    pos[i*3  ] = (Math.random() - 0.5) * 240;
-    pos[i*3+1] = (Math.random() - 0.5) * 160;
-    pos[i*3+2] = (Math.random() - 0.5) * 240;
-  }
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const mat = new THREE.PointsMaterial({ color: 0x444444, size: 0.18, sizeAttenuation: true });
-  scene.add(new THREE.Points(geo, mat));
-})();
+// (Star field removed — clean black void)
 
 // ─────────────────────────────────────────────
 //  NODE MANAGEMENT
@@ -850,9 +834,9 @@ function addConnection(ia, ib, weight) {
   geo.setDrawRange(0, LINE_SEGMENTS + 1);
   const isGreen = (ia + ib) % 4 === 0;
   const lineMat = new THREE.LineBasicMaterial({
-    color:       isGreen ? 0xffffff : 0x555555,
+    color:       isGreen ? 0xccddff : 0x667799,
     transparent: true,
-    opacity:     isGreen ? 0.35 : 0.18,
+    opacity:     isGreen ? 0.55 : 0.30,
     depthWrite:  false,
   });
   const line = new THREE.Line(geo, lineMat);
@@ -861,7 +845,13 @@ function addConnection(ia, ib, weight) {
   const particleCount = 1 + (ia % 3);
   const particles     = [];
   for (let p = 0; p < particleCount; p++) {
-    const pmat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+    const pmat  = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: new THREE.Color(0xaaccff),
+      emissiveIntensity: 2.0,
+      transparent: true,
+      opacity: 0.95,
+    });
     const pmesh = new THREE.Mesh(SHARED_PARTICLE_GEO, pmat);
     pmesh.renderOrder = 1;
     particleGroup.add(pmesh);
@@ -957,7 +947,13 @@ function updateRoomBubbles() {
       // Flowing particles along the umbilical
       const umbParticles = [];
       for (let p = 0; p < 3; p++) {
-        const pmat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+        const pmat = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          emissive: new THREE.Color(0xaaccff),
+          emissiveIntensity: 1.5,
+          transparent: true,
+          opacity: 0.6,
+        });
         const pmesh = new THREE.Mesh(SHARED_PARTICLE_GEO, pmat);
         pmesh.renderOrder = 1;
         roomGroup.add(pmesh);
@@ -1369,12 +1365,15 @@ function animate() {
 
     // Fade connections with the dimmest connected node
     const connOpacity = Math.min(a.fadeOpacity, b.fadeOpacity);
-    const baseOpacity = (c.ia + c.ib) % 4 === 0 ? 0.35 : 0.18;
+    const baseOpacity = (c.ia + c.ib) % 4 === 0 ? 0.55 : 0.30;
 
     // Comm rate modulation: active inference → brighter line + faster particles
     c.commRate *= COMM_DECAY;
     const commIntensity = Math.min(1, c.commRate / 5); // 0-1 intensity
-    c.line.material.opacity = (baseOpacity + commIntensity * 0.4) * connOpacity;
+    c.line.material.opacity = (baseOpacity + commIntensity * 0.5) * connOpacity;
+    // Brighten line color during active communication
+    const lineLum = 0.4 + commIntensity * 0.6;
+    c.line.material.color.setRGB(lineLum * 0.8, lineLum * 0.87, lineLum);
 
     c.particles.forEach(p => {
       // Base speed + comm boost (up to 3x faster during active inference)
@@ -1383,8 +1382,9 @@ function animate() {
       c.curve.getPoint(p.t, _tmpOffset);
       p.mesh.position.copy(_tmpOffset);
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
-      // Brighter particles during active communication
-      p.mesh.material.opacity = (0.45 + 0.5 * wave + commIntensity * 0.4) * connOpacity;
+      // Brighter particles during active communication — emissive glow
+      p.mesh.material.opacity = (0.6 + 0.4 * wave + commIntensity * 0.3) * connOpacity;
+      p.mesh.material.emissiveIntensity = 1.5 + commIntensity * 3.0 + wave * 1.0;
       // Scale up particles during inference burst
       p.mesh.scale.setScalar(1 + commIntensity * 1.5);
     });

@@ -912,8 +912,8 @@ function updateRoomBubbles() {
       const bubbleGeo = new THREE.IcosahedronGeometry(1, detail);
       const mat = new THREE.MeshStandardMaterial({
         color: 0xaabbcc,
-        emissive: new THREE.Color(0x223344),
-        emissiveIntensity: 0.15,
+        emissive: new THREE.Color(0x444444),
+        emissiveIntensity: 0.25,
         transparent: true,
         opacity: 0.08,
         roughness: 0.6,
@@ -927,10 +927,10 @@ function updateRoomBubbles() {
 
       // Wireframe overlay — emissive edges show icosahedron structure
       const wireMat = new THREE.MeshBasicMaterial({
-        color: 0x556677,
+        color: 0x888888,
         wireframe: true,
         transparent: true,
-        opacity: 0.08,
+        opacity: 0.10,
         depthWrite: false,
       });
       const wireMesh = new THREE.Mesh(bubbleGeo, wireMat);

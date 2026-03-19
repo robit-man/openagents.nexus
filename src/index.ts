@@ -90,17 +90,43 @@ async function* streamReader(stream: any): AsyncGenerator<InvokeMessage | null> 
   const iterable = stream[Symbol.asyncIterator] ? stream : stream.source;
   if (!iterable) return;
 
+  // NDJSON line buffer — accumulates partial lines across TCP segments.
+  // Large messages (e.g. invoke.chunk with full conversation + tools) can span
+  // multiple TCP reads. We must buffer until a complete newline-terminated line
+  // is available before attempting JSON.parse.
+  let lineBuffer = '';
+
   try {
     for await (const rawData of iterable) {
       // Handle both Uint8Array and Uint8ArrayList
       const bytes = rawData instanceof Uint8Array
         ? rawData
         : (typeof rawData.subarray === 'function' ? rawData.subarray() : new Uint8Array(rawData.buffer ?? []));
-      // NDJSON-safe: a single read may contain multiple coalesced messages
-      // (e.g. invoke.open + invoke.chunk sent back-to-back by the caller)
-      const msgs = decodeStreamMessages(bytes);
-      for (const msg of msgs) {
-        yield msg;
+
+      lineBuffer += new TextDecoder().decode(bytes);
+
+      // Process all complete newline-terminated lines in the buffer
+      while (lineBuffer.includes('\n')) {
+        const nlIdx = lineBuffer.indexOf('\n');
+        const line = lineBuffer.slice(0, nlIdx).trim();
+        lineBuffer = lineBuffer.slice(nlIdx + 1);
+        if (!line) continue;
+        try {
+          yield JSON.parse(line) as InvokeMessage;
+        } catch {
+          // Malformed line (not partial — it was newline-terminated)
+          log.debug(`streamReader: failed to parse complete line: ${line.slice(0, 80)}...`);
+        }
+      }
+    }
+
+    // Process any remaining data in buffer (message without trailing newline)
+    const remaining = lineBuffer.trim();
+    if (remaining) {
+      try {
+        yield JSON.parse(remaining) as InvokeMessage;
+      } catch {
+        log.debug(`streamReader: failed to parse remaining buffer: ${remaining.slice(0, 80)}...`);
       }
     }
   } catch {

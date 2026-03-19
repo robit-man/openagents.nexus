@@ -1030,11 +1030,14 @@ function removeBubble(roomId) {
   }
   bubble.messageSprites.forEach(entry => {
     roomGroup.remove(entry.sprite);
-    roomGroup.remove(entry.line);
+    roomGroup.remove(entry.outerLine);
+    roomGroup.remove(entry.innerLine);
     entry.sprite.material?.map?.dispose();
     entry.sprite.material?.dispose();
-    entry.line.geometry?.dispose();
-    entry.line.material?.dispose();
+    entry.outerLine.geometry?.dispose();
+    entry.outerLine.material?.dispose();
+    entry.innerLine.geometry?.dispose();
+    entry.innerLine.material?.dispose();
   });
   roomBubbles.delete(roomId);
 }
@@ -1112,26 +1115,38 @@ function addRoomMessage(roomId, peerId, agentName, content) {
   while (bubble.messageSprites.length >= MAX_ROOM_MESSAGES) {
     const oldest = bubble.messageSprites.shift();
     roomGroup.remove(oldest.sprite);
-    roomGroup.remove(oldest.line);
+    roomGroup.remove(oldest.outerLine);
+    roomGroup.remove(oldest.innerLine);
     oldest.sprite.material?.map?.dispose();
     oldest.sprite.material?.dispose();
-    oldest.line.geometry?.dispose();
-    oldest.line.material?.dispose();
+    oldest.outerLine.geometry?.dispose();
+    oldest.outerLine.material?.dispose();
+    oldest.innerLine.geometry?.dispose();
+    oldest.innerLine.material?.dispose();
   }
 
-  // Create sprite — enhanced TextSprite for bubble surface visibility
+  // Create tag sprite — positioned outside the sphere at a boundary vertex
   const displayText = agentName + ': ' + content;
   const sprite = TextSprite(displayText, { bold: true, fontSize: 13 });
   roomGroup.add(sprite);
 
-  // Create line from message to sender node (pre-allocated 2-point buffer)
-  const lineGeo = new THREE.BufferGeometry();
-  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, depthWrite: false });
-  const line = new THREE.Line(lineGeo, lineMat);
-  roomGroup.add(line);
+  // Outer tether: tag label → boundary point (short line outside sphere)
+  const outerGeo = new THREE.BufferGeometry();
+  outerGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const outerMat = new THREE.LineBasicMaterial({ color: 0x8899aa, transparent: true, opacity: 0.25, depthWrite: false });
+  const outerLine = new THREE.Line(outerGeo, outerMat);
+  roomGroup.add(outerLine);
 
-  bubble.messageSprites.push({ sprite, line, msg });
+  // Inner tether: sender node → boundary point (line inside the room)
+  const innerGeo = new THREE.BufferGeometry();
+  innerGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const innerMat = new THREE.LineBasicMaterial({ color: 0x667788, transparent: true, opacity: 0.18, depthWrite: false });
+  const innerLine = new THREE.Line(innerGeo, innerMat);
+  roomGroup.add(innerLine);
+
+  // Unique angular slot for this message's boundary attachment point
+  const slot = bubble.messageSprites.length;
+  bubble.messageSprites.push({ sprite, outerLine, innerLine, msg, slot });
 
   pushLog('<span class="log-highlight">' + agentName + '</span> in <span class="log-room">' + roomId + '</span>: ' + content.slice(0, 80));
 }
@@ -1490,7 +1505,7 @@ function animate() {
       });
     }
 
-    // Position message sprites on the outer boundary, distributed vertically
+    // Position message tags at boundary vertices with inner + outer tethers
     const spriteCount = bubble.messageSprites.length;
     for (let i = spriteCount - 1; i >= 0; i--) {
       const entry = bubble.messageSprites[i];
@@ -1502,42 +1517,67 @@ function animate() {
 
       if (opacity <= 0) {
         roomGroup.remove(entry.sprite);
-        roomGroup.remove(entry.line);
+        roomGroup.remove(entry.outerLine);
+        roomGroup.remove(entry.innerLine);
         entry.sprite.material?.map?.dispose();
         entry.sprite.material?.dispose();
-        entry.line.geometry?.dispose();
-        entry.line.material?.dispose();
+        entry.outerLine.geometry?.dispose();
+        entry.outerLine.material?.dispose();
+        entry.innerLine.geometry?.dispose();
+        entry.innerLine.material?.dispose();
         bubble.messageSprites.splice(i, 1);
         continue;
       }
 
       entry.sprite.material.opacity = opacity * 0.95;
-      entry.line.material.opacity = opacity * 0.18;
+      entry.outerLine.material.opacity = opacity * 0.25;
+      entry.innerLine.material.opacity = opacity * 0.18;
 
-      // Place on the outer surface, spread vertically (reuse temp vector)
-      const slot = i / Math.max(1, spriteCount - 1);
-      const theta = (slot * Math.PI * 1.2) - Math.PI * 0.6;
-      const phi = now * 0.00015 + i * 0.4;
-      const r = radius + 0.5;
-      _tmpOffset.set(
-        Math.cos(phi) * r * Math.cos(theta),
-        Math.sin(theta) * r * 0.7,
-        Math.sin(phi) * r * Math.cos(theta)
+      // Compute boundary attachment point — unique angle per message slot
+      const theta = (entry.slot / Math.max(1, MAX_ROOM_MESSAGES)) * Math.PI * 1.6 - Math.PI * 0.8;
+      const phi = entry.slot * 0.7 + 0.3;
+      _tmpDir.set(
+        Math.cos(phi) * Math.cos(theta),
+        Math.sin(theta) * 0.7,
+        Math.sin(phi) * Math.cos(theta)
+      ).normalize();
+
+      // Boundary point: centroid + direction * radius
+      const bx = _tmpCentroid.x + _tmpDir.x * radius;
+      const by = _tmpCentroid.y + _tmpDir.y * radius;
+      const bz = _tmpCentroid.z + _tmpDir.z * radius;
+
+      // Tag sprite: just outside the boundary
+      const tagOffset = 1.8;
+      entry.sprite.position.set(
+        bx + _tmpDir.x * tagOffset,
+        by + _tmpDir.y * tagOffset,
+        bz + _tmpDir.z * tagOffset
       );
-      entry.sprite.position.copy(_tmpCentroid).add(_tmpOffset);
 
-      // Line from sprite to sender node (direct buffer write, no clone/setFromPoints)
+      // Outer tether: tag sprite → boundary point
+      const oAttr = entry.outerLine.geometry.attributes.position;
+      const oArr = oAttr.array;
+      oArr[0] = entry.sprite.position.x;
+      oArr[1] = entry.sprite.position.y;
+      oArr[2] = entry.sprite.position.z;
+      oArr[3] = bx;
+      oArr[4] = by;
+      oArr[5] = bz;
+      oAttr.needsUpdate = true;
+
+      // Inner tether: sender node → boundary point
       const senderIdx = bubble.members.get(entry.msg.peerId);
       if (senderIdx !== undefined && nodes[senderIdx]) {
-        const lAttr = entry.line.geometry.attributes.position;
-        const lArr = lAttr.array;
-        lArr[0] = entry.sprite.position.x;
-        lArr[1] = entry.sprite.position.y;
-        lArr[2] = entry.sprite.position.z;
-        lArr[3] = nodes[senderIdx].pos.x;
-        lArr[4] = nodes[senderIdx].pos.y;
-        lArr[5] = nodes[senderIdx].pos.z;
-        lAttr.needsUpdate = true;
+        const iAttr = entry.innerLine.geometry.attributes.position;
+        const iArr = iAttr.array;
+        iArr[0] = nodes[senderIdx].pos.x;
+        iArr[1] = nodes[senderIdx].pos.y;
+        iArr[2] = nodes[senderIdx].pos.z;
+        iArr[3] = bx;
+        iArr[4] = by;
+        iArr[5] = bz;
+        iAttr.needsUpdate = true;
       }
     }
   });

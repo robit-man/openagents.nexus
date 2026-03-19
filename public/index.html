@@ -576,6 +576,13 @@ scene.add(particleGroup);
 
 const connections = []; // { curve, line, particles, ia, ib, weight }
 
+// ── ROOM BUBBLE VISUALIZATION ──
+const roomGroup = new THREE.Group();
+scene.add(roomGroup);
+const roomBubbles = new Map(); // roomId -> { mesh, wireframe, members, messages, messageSprites, lineGroup }
+const MAX_ROOM_MESSAGES = 8;
+const ROOM_MSG_LIFETIME = 60_000; // 60s display before fade
+
 // ── Cellular diffusion simulation constants ──
 const SIM = {
   REPULSION:    3.0,    // Coulomb-like repulsion strength
@@ -753,6 +760,182 @@ function buildConnections() {
       if (target !== i) addConnection(i, target);
     }
   }
+}
+
+// ─────────────────────────────────────────────
+//  ROOM BUBBLE MANAGEMENT
+// ─────────────────────────────────────────────
+function updateRoomBubbles() {
+  // Collect room memberships from knownAgents
+  const roomMembers = new Map(); // roomId -> [{ peerId, nodeIndex }]
+  for (const [peerId, agent] of knownAgents) {
+    const nd = nodes[agent.index];
+    if (!nd || nd.fadeOpacity < 0.1) continue; // skip faded nodes
+    const rooms = agent.data?.rooms || [];
+    for (const roomId of rooms) {
+      if (!roomMembers.has(roomId)) roomMembers.set(roomId, []);
+      roomMembers.get(roomId).push({ peerId, nodeIndex: agent.index });
+    }
+  }
+
+  // Create/update bubbles for rooms with 2+ visible members
+  for (const [roomId, members] of roomMembers) {
+    if (members.length < 2) {
+      removeBubble(roomId);
+      continue;
+    }
+
+    if (!roomBubbles.has(roomId)) {
+      // Create translucent bubble shell
+      const geo = new THREE.SphereGeometry(1, 48, 48);
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.03,
+        roughness: 0.0,
+        metalness: 0.1,
+        transmission: 0.97,
+        thickness: 0.05,
+        ior: 1.5,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.renderOrder = -1;
+      roomGroup.add(mesh);
+
+      // Wireframe for shiny edge highlight
+      const wireGeo = new THREE.SphereGeometry(1, 24, 16);
+      const wireMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.02,
+        wireframe: true,
+        depthWrite: false,
+      });
+      const wireframe = new THREE.Mesh(wireGeo, wireMat);
+      mesh.add(wireframe);
+
+      // Room label sprite
+      const labelSprite = makeRoomLabel(roomId);
+      roomGroup.add(labelSprite);
+
+      roomBubbles.set(roomId, {
+        mesh,
+        wireframe,
+        labelSprite,
+        members: new Map(members.map(m => [m.peerId, m.nodeIndex])),
+        messages: [],
+        messageSprites: [],
+      });
+    } else {
+      const bubble = roomBubbles.get(roomId);
+      bubble.members = new Map(members.map(m => [m.peerId, m.nodeIndex]));
+    }
+  }
+
+  // Remove bubbles for rooms no longer present
+  for (const [roomId] of roomBubbles) {
+    if (!roomMembers.has(roomId) || (roomMembers.get(roomId)?.length || 0) < 2) {
+      removeBubble(roomId);
+    }
+  }
+}
+
+function removeBubble(roomId) {
+  const bubble = roomBubbles.get(roomId);
+  if (!bubble) return;
+  roomGroup.remove(bubble.mesh);
+  roomGroup.remove(bubble.labelSprite);
+  bubble.mesh.geometry?.dispose();
+  bubble.mesh.material?.dispose();
+  bubble.labelSprite.material?.map?.dispose();
+  bubble.labelSprite.material?.dispose();
+  bubble.messageSprites.forEach(entry => {
+    roomGroup.remove(entry.sprite);
+    roomGroup.remove(entry.line);
+    entry.sprite.material?.map?.dispose();
+    entry.sprite.material?.dispose();
+    entry.line.geometry?.dispose();
+    entry.line.material?.dispose();
+  });
+  roomBubbles.delete(roomId);
+}
+
+function makeRoomLabel(roomId) {
+  const cv = document.createElement('canvas');
+  cv.width = 256;
+  cv.height = 48;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 256, 48);
+  ctx.font = 'bold 16px Courier New';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.textAlign = 'center';
+  ctx.fillText(roomId, 128, 30);
+  const tex = new THREE.CanvasTexture(cv);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(2.5, 0.47, 1);
+  return spr;
+}
+
+function makeChatSprite(text) {
+  const cv = document.createElement('canvas');
+  cv.width = 512;
+  cv.height = 48;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 512, 48);
+  ctx.font = '12px Courier New';
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.textAlign = 'left';
+  let display = text;
+  if (ctx.measureText(text).width > 480) {
+    while (ctx.measureText(display + '...').width > 480 && display.length > 0) display = display.slice(0, -1);
+    display += '...';
+  }
+  ctx.fillText(display, 8, 30);
+  const tex = new THREE.CanvasTexture(cv);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(3.5, 0.42, 1);
+  return spr;
+}
+
+function addRoomMessage(roomId, peerId, agentName, content) {
+  const bubble = roomBubbles.get(roomId);
+  if (!bubble) return;
+
+  const msg = { peerId, agentName, content, timestamp: Date.now() };
+  bubble.messages.push(msg);
+
+  // Cap messages
+  while (bubble.messages.length > MAX_ROOM_MESSAGES) bubble.messages.shift();
+  while (bubble.messageSprites.length >= MAX_ROOM_MESSAGES) {
+    const oldest = bubble.messageSprites.shift();
+    roomGroup.remove(oldest.sprite);
+    roomGroup.remove(oldest.line);
+    oldest.sprite.material?.map?.dispose();
+    oldest.sprite.material?.dispose();
+    oldest.line.geometry?.dispose();
+    oldest.line.material?.dispose();
+  }
+
+  // Create sprite
+  const displayText = agentName + ': ' + content;
+  const sprite = makeChatSprite(displayText);
+  roomGroup.add(sprite);
+
+  // Create line from message to sender node
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, depthWrite: false });
+  const line = new THREE.Line(lineGeo, lineMat);
+  roomGroup.add(line);
+
+  bubble.messageSprites.push({ sprite, line, msg });
+
+  pushLog('<span class="log-highlight">' + agentName + '</span> in <span class="log-room">' + roomId + '</span>: ' + content.slice(0, 80));
 }
 
 // ─────────────────────────────────────────────
@@ -939,6 +1122,91 @@ function animate() {
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
       p.mesh.material.opacity = (0.45 + 0.5 * wave) * connOpacity;
     });
+  });
+
+  // ── Update room bubbles ──
+  roomBubbles.forEach((bubble, roomId) => {
+    if (bubble.members.size < 2) return;
+
+    // Compute centroid + max radius from member nodes
+    const centroid = new THREE.Vector3();
+    let count = 0;
+    let maxDist = 0;
+
+    for (const [, nodeIndex] of bubble.members) {
+      const nd = nodes[nodeIndex];
+      if (!nd) continue;
+      centroid.add(nd.pos);
+      count++;
+    }
+
+    if (count < 2) return;
+    centroid.divideScalar(count);
+
+    for (const [, nodeIndex] of bubble.members) {
+      const nd = nodes[nodeIndex];
+      if (!nd) continue;
+      const dist = centroid.distanceTo(nd.pos);
+      if (dist > maxDist) maxDist = dist;
+    }
+
+    // Bubble radius with padding
+    const radius = maxDist + 1.8;
+
+    // Position + scale with subtle pulse
+    const pulse = 1.0 + Math.sin(now * 0.0008) * 0.008;
+    bubble.mesh.position.copy(centroid);
+    bubble.mesh.scale.setScalar(radius * pulse);
+
+    // Room label above the bubble
+    bubble.labelSprite.position.copy(centroid);
+    bubble.labelSprite.position.y += radius + 0.6;
+    bubble.labelSprite.material.opacity = 0.4;
+
+    // Position message sprites on the outer boundary, distributed vertically
+    const spriteCount = bubble.messageSprites.length;
+    for (let i = spriteCount - 1; i >= 0; i--) {
+      const entry = bubble.messageSprites[i];
+      const age = Date.now() - entry.msg.timestamp;
+
+      // Fade out old messages
+      const fadeT = Math.min(1, age / ROOM_MSG_LIFETIME);
+      const opacity = fadeT < 0.7 ? 1.0 : 1.0 - (fadeT - 0.7) / 0.3;
+
+      if (opacity <= 0) {
+        roomGroup.remove(entry.sprite);
+        roomGroup.remove(entry.line);
+        entry.sprite.material?.map?.dispose();
+        entry.sprite.material?.dispose();
+        entry.line.geometry?.dispose();
+        entry.line.material?.dispose();
+        bubble.messageSprites.splice(i, 1);
+        continue;
+      }
+
+      entry.sprite.material.opacity = opacity * 0.85;
+      entry.line.material.opacity = opacity * 0.12;
+
+      // Place on the outer surface, spread vertically
+      const slot = i / Math.max(1, spriteCount - 1);
+      const theta = (slot * Math.PI * 1.2) - Math.PI * 0.6;
+      const phi = now * 0.00015 + i * 0.4;
+      const r = radius + 0.5;
+      const offset = new THREE.Vector3(
+        Math.cos(phi) * r * Math.cos(theta),
+        Math.sin(theta) * r * 0.7,
+        Math.sin(phi) * r * Math.cos(theta)
+      );
+      entry.sprite.position.copy(centroid).add(offset);
+
+      // Line from sprite to sender node
+      const senderIdx = bubble.members.get(entry.msg.peerId);
+      if (senderIdx !== undefined && nodes[senderIdx]) {
+        const pts = [entry.sprite.position.clone(), nodes[senderIdx].pos.clone()];
+        entry.line.geometry.setFromPoints(pts);
+        entry.line.geometry.attributes.position.needsUpdate = true;
+      }
+    }
   });
 
   controls.update();
@@ -1302,6 +1570,9 @@ function reconcileAgents(networkData) {
 
   // Render agent cards in sidebar
   renderAgentCards(liveAgents);
+
+  // Update room bubbles with new membership data
+  updateRoomBubbles();
 }
 
 // ─────────────────────────────────────────────
@@ -1419,6 +1690,7 @@ async function loadDirectory() {
     }
 
     blinkAllNodes();
+    updateRoomBubbles();
     setDial('dial-peers-arc', 'dial-peers-val', (agents.length / 100) * 100, String(agents.length));
   } catch { /* directory unavailable — NATS will handle it */ }
 }
@@ -1540,6 +1812,9 @@ async function connectNats() {
             // Blink the new node
             blinkNode(idx);
 
+            // Update room bubbles
+            updateRoomBubbles();
+
             // Render sidebar card
             renderNatsAgentCard(ann);
           }
@@ -1552,6 +1827,19 @@ async function connectNats() {
 
     // Also subscribe to presence
     nc.subscribe('nexus.agents.presence');
+
+    // Subscribe to public room chat messages
+    const chatSub = nc.subscribe('nexus.rooms.chat');
+    (async () => {
+      for await (const msg of chatSub) {
+        try {
+          const chat = JSON.parse(sc.decode(msg.data));
+          if (!chat.roomId || !chat.content) continue;
+          const name = chat.agentName || (chat.peerId ? chat.peerId.slice(0, 8) : 'anon');
+          addRoomMessage(chat.roomId, chat.peerId || '', name, String(chat.content).slice(0, 200));
+        } catch { /* ignore malformed */ }
+      }
+    })().catch(() => {});
 
   } catch (err) {
     pushLog(`NATS: <span style="color:#666">${err.message || 'unavailable'}</span>`);

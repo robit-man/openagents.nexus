@@ -650,13 +650,20 @@ export class NexusClient {
     peerId: string,
     capability: string,
     input: unknown,
-    options?: { stream?: boolean; maxDurationMs?: number },
+    options?: { stream?: boolean; maxDurationMs?: number; metadata?: Record<string, unknown> },
   ): Promise<unknown | AsyncIterable<InvokeEvent>> {
     this.ensureConnected();
 
     const requestId = uuidv7();
     const maxDurationMs = options?.maxDurationMs ?? 30_000;
     const streamMode = options?.stream ?? false;
+
+    // Build metadata — auto-promote auth_key from input for backward compatibility
+    // with older providers that only check invoke.open metadata (not invoke.chunk data)
+    const metadata: Record<string, unknown> = { ...(options?.metadata ?? {}) };
+    if (input && typeof input === 'object' && 'auth_key' in input) {
+      metadata.auth_key = (input as Record<string, unknown>).auth_key;
+    }
 
     const stream = await this.dialPeerProtocol(peerId, STREAM_PROTOCOLS.INVOKE);
 
@@ -666,6 +673,7 @@ export class NexusClient {
       inputFormat: 'application/json',
       outputMode: streamMode ? 'stream' : 'unary',
       maxDurationMs, maxInputBytes: 65_536, maxOutputBytes: 1_048_576,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     } as InvokeOpen);
 
     streamSend(stream, {

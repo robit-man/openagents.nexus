@@ -33,6 +33,7 @@ export interface InvokeOpen {
   maxDurationMs: number;
   maxInputBytes: number;
   maxOutputBytes: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface InvokeChunk {

@@ -1284,16 +1284,65 @@ function computeFadeOpacity(lastSeenMs) {
 // ─────────────────────────────────────────────
 let lastInteract = performance.now();
 
-canvas.addEventListener('pointerdown', () => {
+// ── Camera tween system — hover/click on sidebar cards ──
+let cameraTween = null;    // { startPos, endPos, startTarget, endTarget, t, duration }
+let lockedNodeIdx = null;  // index of node camera is locked to (click)
+
+function tweenCameraTo(targetPos, lookAt, duration) {
+  cameraTween = {
+    startPos: camera.position.clone(),
+    endPos: targetPos.clone(),
+    startTarget: controls.target.clone(),
+    endTarget: lookAt.clone(),
+    t: 0,
+    duration: duration || 800,
+    startTime: performance.now(),
+  };
+}
+
+function tweenCameraToNode(nodeIdx) {
+  const nd = nodes[nodeIdx];
+  if (!nd) return;
+  // Position camera offset from node
+  const dir = nd.pos.clone().normalize();
+  const camPos = nd.pos.clone().add(dir.multiplyScalar(5)).add(new THREE.Vector3(0, 2, 0));
+  tweenCameraTo(camPos, nd.pos, 600);
+}
+
+function tweenCameraToCenter() {
+  lockedNodeIdx = null;
+  tweenCameraTo(new THREE.Vector3(0, 4, 22), new THREE.Vector3(0, 0, 0), 800);
+}
+
+canvas.addEventListener('pointerdown', (e) => {
   lastInteract = performance.now();
   controls.autoRotate = false;
+  // If clicking the canvas (not sidebar), unlock camera
+  if (lockedNodeIdx !== null && e.target === canvas) {
+    tweenCameraToCenter();
+  }
 });
 
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
 
-  if (now - lastInteract > 4000) controls.autoRotate = true;
+  if (now - lastInteract > 4000 && lockedNodeIdx === null) controls.autoRotate = true;
+
+  // Step camera tween
+  if (cameraTween) {
+    const elapsed = now - cameraTween.startTime;
+    const t = Math.min(1, elapsed / cameraTween.duration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+    camera.position.lerpVectors(cameraTween.startPos, cameraTween.endPos, ease);
+    controls.target.lerpVectors(cameraTween.startTarget, cameraTween.endTarget, ease);
+    if (t >= 1) cameraTween = null;
+  }
+
+  // Track locked node — keep camera target on it
+  if (lockedNodeIdx !== null && nodes[lockedNodeIdx]) {
+    controls.target.lerp(nodes[lockedNodeIdx].pos, 0.1);
+  }
 
   // Run cellular diffusion step
   stepSimulation();
@@ -2006,6 +2055,7 @@ function reconcileAgents(networkData) {
 
   // Update room bubbles with new membership data
   updateRoomBubbles();
+  updateRoomsDropdown();
 }
 
 // ─────────────────────────────────────────────
@@ -2124,6 +2174,7 @@ async function loadDirectory() {
 
     blinkAllNodes();
     updateRoomBubbles();
+    updateRoomsDropdown();
     setDial('dial-peers-arc', 'dial-peers-val', (agents.length / 100) * 100, String(agents.length));
   } catch { /* directory unavailable — NATS will handle it */ }
 }
@@ -2211,10 +2262,18 @@ async function connectNats() {
           const isNew = !natsAgents.has(ann.peerId);
           natsAgents.set(ann.peerId, { ...ann, lastSeen: Date.now() });
 
-          // Refresh lastSeen on the 3D node (heartbeat keeps it visible)
+          // Refresh lastSeen + merge updated rooms/capabilities on heartbeat
           const existingAgent = knownAgents.get(ann.peerId);
           if (existingAgent && nodes[existingAgent.index]) {
             nodes[existingAgent.index].lastSeen = Date.now();
+            // Merge updated announcement data (rooms, capabilities, etc.)
+            const oldRooms = JSON.stringify(existingAgent.data?.rooms || []);
+            existingAgent.data = { ...existingAgent.data, ...ann, lastSeen: Date.now() };
+            const newRooms = JSON.stringify(ann.rooms || []);
+            if (oldRooms !== newRooms) {
+              updateRoomBubbles();
+              updateRoomsDropdown();
+            }
           }
 
           if (isNew) {
@@ -2306,7 +2365,7 @@ function ensureNatsSection() {
     details = document.createElement('details');
     details.id = 'nats-agents-dropdown';
     details.className = 'sidebar-dropdown';
-    details.open = true; // open by default
+    details.open = false; // collapsed by default — many stale agents
 
     const summary = document.createElement('summary');
     summary.textContent = 'live agents (0)';
@@ -2358,11 +2417,94 @@ function renderNatsAgentCard(ann) {
       ${capsStr ? `<div class="peer-meta-item" style="grid-column:1/-1;font-size:7px;color:#555">${capsStr}</div>` : ''}
     </div>
   `;
+  // Hover: tween camera toward agent node
+  card.addEventListener('mouseenter', () => {
+    const agentEntry = knownAgents.get(ann.peerId);
+    if (agentEntry && nodes[agentEntry.index] && lockedNodeIdx === null) {
+      tweenCameraToNode(agentEntry.index);
+    }
+  });
+  card.addEventListener('mouseleave', () => {
+    if (lockedNodeIdx === null) tweenCameraToCenter();
+  });
+  // Click: lock camera target to this agent
+  card.addEventListener('click', () => {
+    const agentEntry = knownAgents.get(ann.peerId);
+    if (agentEntry && nodes[agentEntry.index]) {
+      lockedNodeIdx = agentEntry.index;
+      tweenCameraToNode(agentEntry.index);
+      lastInteract = performance.now();
+      controls.autoRotate = false;
+    }
+  });
+  card.style.cursor = 'pointer';
+
   list.appendChild(card);
 
   // Update count in summary
   const count = list.querySelectorAll('.peer-card').length;
   summary.textContent = `live agents (${count})`;
+}
+
+// ── Rooms dropdown — shows active rooms with member counts ──
+function updateRoomsDropdown() {
+  let details = document.getElementById('rooms-dropdown');
+  if (!details) {
+    details = document.createElement('details');
+    details.id = 'rooms-dropdown';
+    details.className = 'sidebar-dropdown';
+    details.open = true;
+
+    const summary = document.createElement('summary');
+    summary.textContent = 'rooms (0)';
+    details.appendChild(summary);
+
+    const list = document.createElement('div');
+    list.className = 'dropdown-list';
+    details.appendChild(list);
+
+    // Insert at top of sidebar
+    const natsDropdown = document.getElementById('nats-agents-dropdown');
+    if (natsDropdown) {
+      nodesList.insertBefore(details, natsDropdown);
+    } else {
+      nodesList.prepend(details);
+    }
+  }
+
+  const list = details.querySelector('.dropdown-list');
+  const summary = details.querySelector('summary');
+  list.innerHTML = '';
+
+  // Collect rooms from knownAgents
+  const roomMap = new Map();
+  for (const [peerId, agent] of knownAgents) {
+    const nd = nodes[agent.index];
+    if (!nd || nd.fadeOpacity < 0.1) continue;
+    for (const roomId of (agent.data?.rooms || [])) {
+      if (!roomMap.has(roomId)) roomMap.set(roomId, []);
+      roomMap.get(roomId).push(agent.data?.agentName || peerId.slice(0, 8));
+    }
+  }
+
+  for (const [roomId, members] of roomMap) {
+    const card = document.createElement('div');
+    card.className = 'peer-card';
+    card.style.cursor = 'pointer';
+    card.innerHTML = `
+      <div class="peer-name">
+        <div class="peer-dot" style="background:#667788;box-shadow:0 0 3px #667788"></div>
+        <div class="peer-name-text" style="font-size:10px">${roomId}</div>
+      </div>
+      <div class="peer-meta">
+        <div class="peer-meta-item">${members.length} member${members.length !== 1 ? 's' : ''}</div>
+        <div class="peer-meta-item" style="font-size:7px;color:#555">${members.join(', ')}</div>
+      </div>
+    `;
+    list.appendChild(card);
+  }
+
+  summary.textContent = 'rooms (' + roomMap.size + ')';
 }
 
 connectNats();

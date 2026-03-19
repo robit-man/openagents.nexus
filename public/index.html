@@ -606,6 +606,8 @@ const NODE_SIZE    = 0.08; // small spheres — like neurons
 
 // ── Shared geometries (avoid per-object allocation) ──
 const SHARED_NODE_GEO     = new THREE.SphereGeometry(NODE_SIZE, 12, 12);
+const SHARED_AGENT_GEO    = new THREE.IcosahedronGeometry(NODE_SIZE * 1.5, 1); // 80 faces — agent ico
+const SHARED_AGENT_ORIG   = new Float32Array(SHARED_AGENT_GEO.attributes.position.array); // pristine copy
 const SHARED_PARTICLE_GEO = new THREE.SphereGeometry(0.025, 3, 3);
 const SHARED_BUBBLE_GEO   = new THREE.IcosahedronGeometry(1, 1);  // 80 faces — light, faceted bubble
 const LINE_SEGMENTS       = 24;  // curve resolution (down from 64)
@@ -738,7 +740,7 @@ function makeLabelSprite(text) {
   return spr;
 }
 
-function addNode(label, index, total) {
+function addNode(label, index, total, isAgent) {
   // Random initial placement on a sphere shell with jitter — the simulation will settle them
   const theta = Math.random() * Math.PI * 2;
   const phi   = Math.acos(2 * Math.random() - 1);
@@ -749,14 +751,25 @@ function addNode(label, index, total) {
     r * Math.sin(phi) * Math.sin(theta)
   );
 
+  // Agents get their own IcosahedronGeometry clone (for per-node vertex undulation)
+  // Non-agents use the shared sphere geometry
+  let geo;
+  let origPositions = null;
+  if (isAgent) {
+    geo = SHARED_AGENT_GEO.clone();
+    origPositions = new Float32Array(SHARED_AGENT_ORIG);
+  }
+
   const mat = new THREE.MeshStandardMaterial({
     color:            0xffffff,
     emissive:         new THREE.Color(0xffffff),
-    emissiveIntensity: 0.35,
-    roughness:        0.3,
-    metalness:        0.6,
+    emissiveIntensity: isAgent ? 1.2 : 0.35,
+    roughness:        isAgent ? 0.05 : 0.3,
+    metalness:        isAgent ? 0.95 : 0.6,
+    transparent:      true,
+    opacity:          0.95,
   });
-  const mesh = new THREE.Mesh(SHARED_NODE_GEO, mat);
+  const mesh = new THREE.Mesh(isAgent ? geo : SHARED_NODE_GEO, mat);
   mesh.position.copy(pos);
   mesh.scale.setScalar(0.001); // animate in
   nodeGroup.add(mesh);
@@ -778,6 +791,10 @@ function addNode(label, index, total) {
     blinkUntil:  0,
     lastSeen:    Date.now(),          // timestamp for stale fadeout
     fadeOpacity: 1.0,                 // current opacity (1=visible, 0=faded)
+    _isAgent:    !!isAgent,           // agent flag for undulation
+    _icoGeo:     isAgent ? geo : null,
+    _icoOrig:    origPositions,
+    _phase:      Math.random() * Math.PI * 2, // unique phase offset per agent
   };
 
   nodes.push(node);
@@ -787,9 +804,11 @@ function addNode(label, index, total) {
 function removeNode(index) {
   if (index < 0 || index >= nodes.length) return;
   const nd = nodes[index];
-  // Remove Three.js objects from scene (geometry is shared — don't dispose)
+  // Remove Three.js objects from scene
   nodeGroup.remove(nd.mesh);
   nodeGroup.remove(nd.sprite);
+  // Agent nodes have their own cloned geometry — dispose it
+  if (nd._icoGeo) nd._icoGeo.dispose();
   nd.mat?.dispose?.();
   nd.sprite.material?.map?.dispose();
   nd.sprite.material?.dispose();
@@ -1284,9 +1303,32 @@ function animate() {
     // Blink from real ping — bright emissive when blinkUntil > now, dim otherwise
     if (nd.blinkUntil > now) {
       const fade = (nd.blinkUntil - now) / 400;
-      nd.mat.emissiveIntensity = 0.6 * Math.min(1, fade) * opacity;
+      nd.mat.emissiveIntensity = (nd._isAgent ? 1.5 : 0.6) * Math.min(1, fade) * opacity;
     } else {
-      nd.mat.emissiveIntensity = 0.1 * opacity;
+      nd.mat.emissiveIntensity = (nd._isAgent ? 0.8 : 0.1) * opacity;
+    }
+
+    // Undulate agent icosahedron vertices — violent stretching like the central core
+    if (nd._isAgent && nd._icoGeo && nd._icoOrig) {
+      const posAttr = nd._icoGeo.attributes.position;
+      const arr = posAttr.array;
+      const orig = nd._icoOrig;
+      const t = now * 0.001 + nd._phase;
+      const intensity = 0.15 + sceneActivity * 0.4;
+      for (let vi = 0; vi < arr.length; vi += 3) {
+        const ox = orig[vi], oy = orig[vi + 1], oz = orig[vi + 2];
+        const n1 = Math.sin(ox * 5.3 + t * 3.1) * Math.cos(oy * 4.7 + t * 2.3);
+        const n2 = Math.sin(oz * 6.1 + t * 4.7) * Math.sin(ox * 3.3 + t * 3.9);
+        const n3 = Math.cos(oy * 8.1 + t * 5.9) * Math.sin(oz * 5.1 + t * 1.7);
+        const disp = (n1 + n2 + n3) * intensity;
+        arr[vi]     = ox * (1 + disp);
+        arr[vi + 1] = oy * (1 + disp * 1.4);
+        arr[vi + 2] = oz * (1 + disp * 0.7);
+      }
+      posAttr.needsUpdate = true;
+      nd._icoGeo.computeVertexNormals();
+      nd.mesh.rotation.x += 0.005 + sceneActivity * 0.01;
+      nd.mesh.rotation.y += 0.007 + sceneActivity * 0.015;
     }
   });
 
@@ -1818,7 +1860,7 @@ function reconcileAgents(networkData) {
 
     const label = agent.agentName || agent.peerId.slice(0, 8);
     const idx = nodes.length;
-    addNode(label, idx, nodes.length + liveAgents.length - added);
+    addNode(label, idx, nodes.length + liveAgents.length - added, true);
     knownAgents.set(agent.peerId, { index: idx, data: agent });
     added++;
 
@@ -1939,7 +1981,7 @@ async function loadDirectory() {
 
       const label = agent.agentName || agent.peerId.slice(0, 8);
       const idx = nodes.length;
-      const nd = addNode(label, idx, nodes.length + agents.length);
+      const nd = addNode(label, idx, nodes.length + agents.length, true);
       // Use KV lastSeen if available, otherwise current time
       nd.lastSeen = agent.lastSeen || agent.updatedAt || Date.now();
       knownAgents.set(agent.peerId, { index: idx, data: agent });
@@ -2063,7 +2105,7 @@ async function connectNats() {
 
             // Add to Three.js scene
             const idx = nodes.length;
-            addNode(label, idx, nodes.length + 1);
+            addNode(label, idx, nodes.length + 1, true);
             knownAgents.set(ann.peerId, { index: idx, data: ann });
 
             // Build connections between new agent and existing agents (weight by interaction)

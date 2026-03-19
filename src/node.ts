@@ -28,6 +28,9 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { mdns } from '@libp2p/mdns';
 import { ping } from '@libp2p/ping';
 import { circuitRelayTransport, circuitRelayServer } from '@libp2p/circuit-relay-v2';
+import { autoNAT } from '@libp2p/autonat';
+import { dcutr } from '@libp2p/dcutr';
+import { uPnPNAT } from '@libp2p/upnp-nat';
 import { pubsubPeerDiscovery } from '@libp2p/pubsub-peer-discovery';
 import { peerIdFromString } from '@libp2p/peer-id';
 import type { PrivateKey } from '@libp2p/interface';
@@ -57,7 +60,7 @@ const log = createLogger('node');
  *   - Pubsub peer discovery on the global nexus discovery topic
  *   - mDNS for local-network peer discovery (controllable via discoveryConfig)
  *   - Bootstrap peer discovery (when the resolved bootstrap list is non-empty)
- *   - Circuit relay server for non-light roles (helps NAT'd peers connect)
+ *   - Circuit relay server for ALL roles by default (helps NAT'd peers connect)
  *
  * @param config         - Nexus node configuration
  * @param privateKey     - Ed25519 private key for this node's identity
@@ -153,14 +156,35 @@ export async function createNexusNode(
     return nexusMsgIdFn({ data: msg.data });
   }
 
-  // Build services — full/storage nodes act as circuit relay servers, helping
-  // NAT'd light nodes connect to the rest of the network.
-  const isRelayServer = discovery.enableCircuitRelay && config.role !== 'light';
+  // Build services — by default ALL nodes act as circuit relay servers so that
+  // an all-light-node network still has relays.  Controlled by config.enableRelayServer
+  // (defaults to true).  Relay limits are raised for inference payloads.
+  const isRelayServer = discovery.enableCircuitRelay &&
+    (config.enableRelayServer !== false);
+
+  // NAT traversal services — enabled by default for maximum connectivity:
+  //   AutoNAT:  detects if we're behind NAT by asking peers to dial us
+  //   DCUtR:    hole-punching — upgrades relay connections to direct ones
+  //   UPnP NAT: auto-opens ports on UPnP-capable routers
+  const enableAutoNAT = config.enableAutoNAT !== false;
+  const enableDcutr = config.enableDcutr !== false && discovery.enableCircuitRelay;
+  const enableUpnpNat = config.enableUpnpNat !== false;
+
+  // Filter private/loopback addresses from external announcements so remote
+  // peers don't try to dial 127.x / 192.168.x / 10.x / 172.16-31.x addresses.
+  const filterPrivate = config.filterPrivateAddresses !== false;
 
   const node = await createLibp2p({
     privateKey,
     addresses: {
       listen: listenAddresses,
+      ...(filterPrivate ? {
+        announceFilter: (multiaddrs: any[]) =>
+          multiaddrs.filter((ma: any) => {
+            const s = ma.toString();
+            return !/\/(127\.\d+|10\.\d+|192\.168\.\d+|172\.(1[6-9]|2\d|3[01])\.)/.test(s);
+          }),
+      } : {}),
     },
     transports,
     connectionEncrypters: [noise()],
@@ -181,7 +205,19 @@ export async function createNexusNode(
         allowPublishToZeroTopicPeers: true,
         msgIdFn: gossipMsgIdFn,
       }),
-      ...(isRelayServer ? { relay: circuitRelayServer() } : {}),
+      ...(isRelayServer ? { relay: circuitRelayServer({
+        reservations: {
+          maxReservations: 128,
+          defaultDurationLimit: 600_000,    // 10 min — long enough for inference
+          defaultDataLimit: BigInt(16 << 20), // 16 MB — large model responses
+        },
+      }) } : {}),
+      // NAT traversal stack
+      ...(enableAutoNAT ? { autoNAT: autoNAT() } : {}),
+      ...(enableDcutr ? { dcutr: dcutr() } : {}),
+      ...(enableUpnpNat ? { upnpNAT: uPnPNAT({
+        portMappingDescription: `nexus-${config.agentName}`,
+      }) } : {}),
     },
   });
 
@@ -192,6 +228,9 @@ export async function createNexusNode(
     `mdns=${discovery.enableMdns}, ` +
     `pubsub=${discovery.enablePubsubDiscovery}, ` +
     `relay=${discovery.enableCircuitRelay}`,
+  );
+  log.info(
+    `NAT traversal: autoNAT=${enableAutoNAT}, dcutr=${enableDcutr}, upnpNAT=${enableUpnpNat}, relayServer=${isRelayServer}, announceFilter=${filterPrivate}`,
   );
   log.info(`Listening on: ${node.getMultiaddrs().map((a) => a.toString()).join(', ')}`);
 

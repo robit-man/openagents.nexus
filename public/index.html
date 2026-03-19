@@ -604,6 +604,18 @@ const FADE_RANGE_MS = FADE_TOTAL_MS - FADE_GRACE_MS;
 const ORBIT_RADIUS = 7.5;
 const NODE_SIZE    = 0.08; // small spheres — like neurons
 
+// ── Shared geometries (avoid per-object allocation) ──
+const SHARED_NODE_GEO     = new THREE.SphereGeometry(NODE_SIZE, 12, 12);
+const SHARED_PARTICLE_GEO = new THREE.SphereGeometry(0.025, 3, 3);
+const SHARED_BUBBLE_GEO   = new THREE.IcosahedronGeometry(1, 1);  // 80 faces — light, faceted bubble
+const LINE_SEGMENTS       = 24;  // curve resolution (down from 64)
+
+// ── Pre-allocated temp vectors for animate loop (zero GC pressure) ──
+const _tmpMid     = new THREE.Vector3();
+const _tmpMid2    = new THREE.Vector3();
+const _tmpCentroid = new THREE.Vector3();
+const _tmpOffset  = new THREE.Vector3();
+
 function makeLabelSprite(text) {
   const cv  = document.createElement('canvas');
   cv.width  = 256;
@@ -632,21 +644,16 @@ function addNode(label, index, total) {
     r * Math.sin(phi) * Math.sin(theta)
   );
 
-  const geo = new THREE.SphereGeometry(NODE_SIZE, 24, 24);
   const mat = new THREE.MeshStandardMaterial({
     color:            0xffffff,
     emissive:         new THREE.Color(0xffffff),
-    emissiveIntensity: 0.14,
+    emissiveIntensity: 0.35,
     roughness:        0.3,
     metalness:        0.6,
   });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(SHARED_NODE_GEO, mat);
   mesh.position.copy(pos);
   mesh.scale.setScalar(0.001); // animate in
-
-  const light = new THREE.PointLight(0xffffff, 0.3, 7);
-  light.position.copy(pos);
-  nodeGroup.add(light);
   nodeGroup.add(mesh);
 
   const sprite = makeLabelSprite(label);
@@ -658,10 +665,10 @@ function addNode(label, index, total) {
   const node = {
     mesh,
     mat,
-    light,
     sprite,
     pos:         pos.clone(),         // current simulation position
     vel:         new THREE.Vector3(), // velocity for diffusion simulation
+    _force:      new THREE.Vector3(), // reused each sim step
     birthTime:   performance.now() + index * 100,
     blinkUntil:  0,
     lastSeen:    Date.now(),          // timestamp for stale fadeout
@@ -675,11 +682,9 @@ function addNode(label, index, total) {
 function removeNode(index) {
   if (index < 0 || index >= nodes.length) return;
   const nd = nodes[index];
-  // Remove Three.js objects from scene
+  // Remove Three.js objects from scene (geometry is shared — don't dispose)
   nodeGroup.remove(nd.mesh);
-  nodeGroup.remove(nd.light);
   nodeGroup.remove(nd.sprite);
-  nd.mesh.geometry?.dispose();
   nd.mat?.dispose?.();
   nd.sprite.material?.map?.dispose();
   nd.sprite.material?.dispose();
@@ -691,8 +696,7 @@ function removeNode(index) {
       connections[i].line.material?.dispose();
       connections[i].particles.forEach(p => {
         particleGroup.remove(p.mesh);
-        p.mesh.geometry?.dispose();
-        p.mesh.material?.dispose();
+        p.mesh.material?.dispose(); // geometry is shared — don't dispose
       });
       connections.splice(i, 1);
     }
@@ -714,8 +718,12 @@ function addConnection(ia, ib, weight) {
     a.pos.clone(), new THREE.Vector3(), new THREE.Vector3(), b.pos.clone()
   );
 
-  const pts  = curve.getPoints(64);
-  const geo  = new THREE.BufferGeometry().setFromPoints(pts);
+  // Pre-allocate line buffer (avoids setFromPoints + GC every frame)
+  const lineVerts = (LINE_SEGMENTS + 1) * 3;
+  const posArr = new Float32Array(lineVerts);
+  const geo  = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geo.setDrawRange(0, LINE_SEGMENTS + 1);
   const isGreen = (ia + ib) % 4 === 0;
   const lineMat = new THREE.LineBasicMaterial({
     color:       isGreen ? 0xffffff : 0x555555,
@@ -729,9 +737,8 @@ function addConnection(ia, ib, weight) {
   const particleCount = 1 + (ia % 3);
   const particles     = [];
   for (let p = 0; p < particleCount; p++) {
-    const pgeo  = new THREE.SphereGeometry(0.025, 4, 4);
     const pmat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
-    const pmesh = new THREE.Mesh(pgeo, pmat);
+    const pmesh = new THREE.Mesh(SHARED_PARTICLE_GEO, pmat);
     pmesh.renderOrder = 1;
     particleGroup.add(pmesh);
     particles.push({ mesh: pmesh, t: (p / particleCount), speed: 0.003 + (ib % 5) * 0.001 });
@@ -786,37 +793,17 @@ function updateRoomBubbles() {
     }
 
     if (!roomBubbles.has(roomId)) {
-      // Create translucent bubble shell
-      const geo = new THREE.SphereGeometry(1, 48, 48);
-      const mat = new THREE.MeshPhysicalMaterial({
+      // Create translucent faceted bubble (IcosahedronGeometry — 80 faces, lightweight)
+      const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: 0.03,
-        roughness: 0.0,
-        metalness: 0.1,
-        transmission: 0.97,
-        thickness: 0.05,
-        ior: 1.5,
-        clearcoat: 1.0,
-        clearcoatRoughness: 0.0,
+        opacity: 0.035,
         side: THREE.DoubleSide,
         depthWrite: false,
       });
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(SHARED_BUBBLE_GEO, mat);
       mesh.renderOrder = -1;
       roomGroup.add(mesh);
-
-      // Wireframe for shiny edge highlight
-      const wireGeo = new THREE.SphereGeometry(1, 24, 16);
-      const wireMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.02,
-        wireframe: true,
-        depthWrite: false,
-      });
-      const wireframe = new THREE.Mesh(wireGeo, wireMat);
-      mesh.add(wireframe);
 
       // Room label sprite
       const labelSprite = makeRoomLabel(roomId);
@@ -824,7 +811,6 @@ function updateRoomBubbles() {
 
       roomBubbles.set(roomId, {
         mesh,
-        wireframe,
         labelSprite,
         members: new Map(members.map(m => [m.peerId, m.nodeIndex])),
         messages: [],
@@ -849,8 +835,7 @@ function removeBubble(roomId) {
   if (!bubble) return;
   roomGroup.remove(bubble.mesh);
   roomGroup.remove(bubble.labelSprite);
-  bubble.mesh.geometry?.dispose();
-  bubble.mesh.material?.dispose();
+  bubble.mesh.material?.dispose(); // geometry is shared — don't dispose
   bubble.labelSprite.material?.map?.dispose();
   bubble.labelSprite.material?.dispose();
   bubble.messageSprites.forEach(entry => {
@@ -927,8 +912,9 @@ function addRoomMessage(roomId, peerId, agentName, content) {
   const sprite = makeChatSprite(displayText);
   roomGroup.add(sprite);
 
-  // Create line from message to sender node
-  const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  // Create line from message to sender node (pre-allocated 2-point buffer)
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
   const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, depthWrite: false });
   const line = new THREE.Line(lineGeo, lineMat);
   roomGroup.add(line);
@@ -953,8 +939,8 @@ function stepSimulation() {
   const n = activeNodes.length;
   if (n === 0) return;
 
-  // Reset forces
-  for (let i = 0; i < n; i++) activeNodes[i]._force = new THREE.Vector3();
+  // Reset forces (reuse pre-allocated vectors)
+  for (let i = 0; i < n; i++) activeNodes[i]._force.set(0, 0, 0);
 
   // 1. Repulsion — all pairs (O(n²), fine for < 200 nodes)
   for (let i = 0; i < n; i++) {
@@ -1063,22 +1049,18 @@ function animate() {
     nd.sprite.material.opacity = 0.7 * opacity;
     nd.mat.opacity = opacity;
     nd.mat.transparent = opacity < 1.0;
-    nd.light.intensity *= opacity;
 
     // Apply simulation position
     nd.mesh.position.copy(nd.pos);
-    nd.light.position.copy(nd.pos);
     nd.sprite.position.copy(nd.pos);
     nd.sprite.position.y += NODE_SIZE + 0.45;
 
-    // Blink from real ping — bright when blinkUntil > now, dim otherwise
+    // Blink from real ping — bright emissive when blinkUntil > now, dim otherwise
     if (nd.blinkUntil > now) {
       const fade = (nd.blinkUntil - now) / 400;
       nd.mat.emissiveIntensity = 0.6 * Math.min(1, fade) * opacity;
-      nd.light.intensity = 0.5 * Math.min(1, fade) * opacity;
     } else {
-      nd.mat.emissiveIntensity = 0.04 * opacity;
-      nd.light.intensity = 0.08 * opacity;
+      nd.mat.emissiveIntensity = 0.1 * opacity;
     }
   });
 
@@ -1089,26 +1071,33 @@ function animate() {
     const b = nodes[c.ib];
     if (!a || !b) return;
 
-    // Recompute Bezier control points from current positions
+    // Recompute Bezier control points from current positions (reuse temp vectors)
     const seed = (c.ia * 31 + c.ib * 17) % 100;
-    const mid = new THREE.Vector3().addVectors(a.pos, b.pos).multiplyScalar(0.5);
-    mid.x += Math.sin(seed * 0.4) * 1.5;
-    mid.y += Math.cos(seed * 0.6) * 1.5;
-    mid.z += Math.sin(seed * 0.3) * 1.5;
-    const mid2 = mid.clone();
-    mid2.x -= Math.cos(seed * 0.8) * 1.0;
-    mid2.y += Math.sin(seed * 0.5) * 1.0;
-    mid2.z -= Math.sin(seed * 0.9) * 1.0;
+    _tmpMid.addVectors(a.pos, b.pos).multiplyScalar(0.5);
+    _tmpMid.x += Math.sin(seed * 0.4) * 1.5;
+    _tmpMid.y += Math.cos(seed * 0.6) * 1.5;
+    _tmpMid.z += Math.sin(seed * 0.3) * 1.5;
+    _tmpMid2.copy(_tmpMid);
+    _tmpMid2.x -= Math.cos(seed * 0.8) * 1.0;
+    _tmpMid2.y += Math.sin(seed * 0.5) * 1.0;
+    _tmpMid2.z -= Math.sin(seed * 0.9) * 1.0;
 
     c.curve.v0.copy(a.pos);
-    c.curve.v1.copy(mid);
-    c.curve.v2.copy(mid2);
+    c.curve.v1.copy(_tmpMid);
+    c.curve.v2.copy(_tmpMid2);
     c.curve.v3.copy(b.pos);
 
-    // Rebuild line geometry from updated curve
-    const pts = c.curve.getPoints(64);
-    c.line.geometry.setFromPoints(pts);
-    c.line.geometry.attributes.position.needsUpdate = true;
+    // Write curve points directly into pre-allocated buffer (no setFromPoints / GC)
+    const posAttr = c.line.geometry.attributes.position;
+    const arr = posAttr.array;
+    for (let s = 0; s <= LINE_SEGMENTS; s++) {
+      c.curve.getPoint(s / LINE_SEGMENTS, _tmpOffset);
+      const o = s * 3;
+      arr[o]     = _tmpOffset.x;
+      arr[o + 1] = _tmpOffset.y;
+      arr[o + 2] = _tmpOffset.z;
+    }
+    posAttr.needsUpdate = true;
 
     // Fade connections with the dimmest connected node
     const connOpacity = Math.min(a.fadeOpacity, b.fadeOpacity);
@@ -1128,25 +1117,25 @@ function animate() {
   roomBubbles.forEach((bubble, roomId) => {
     if (bubble.members.size < 2) return;
 
-    // Compute centroid + max radius from member nodes
-    const centroid = new THREE.Vector3();
+    // Compute centroid + max radius from member nodes (reuse temp vector)
+    _tmpCentroid.set(0, 0, 0);
     let count = 0;
     let maxDist = 0;
 
     for (const [, nodeIndex] of bubble.members) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
-      centroid.add(nd.pos);
+      _tmpCentroid.add(nd.pos);
       count++;
     }
 
     if (count < 2) return;
-    centroid.divideScalar(count);
+    _tmpCentroid.divideScalar(count);
 
     for (const [, nodeIndex] of bubble.members) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
-      const dist = centroid.distanceTo(nd.pos);
+      const dist = _tmpCentroid.distanceTo(nd.pos);
       if (dist > maxDist) maxDist = dist;
     }
 
@@ -1155,11 +1144,11 @@ function animate() {
 
     // Position + scale with subtle pulse
     const pulse = 1.0 + Math.sin(now * 0.0008) * 0.008;
-    bubble.mesh.position.copy(centroid);
+    bubble.mesh.position.copy(_tmpCentroid);
     bubble.mesh.scale.setScalar(radius * pulse);
 
     // Room label above the bubble
-    bubble.labelSprite.position.copy(centroid);
+    bubble.labelSprite.position.copy(_tmpCentroid);
     bubble.labelSprite.position.y += radius + 0.6;
     bubble.labelSprite.material.opacity = 0.4;
 
@@ -1187,24 +1176,30 @@ function animate() {
       entry.sprite.material.opacity = opacity * 0.85;
       entry.line.material.opacity = opacity * 0.12;
 
-      // Place on the outer surface, spread vertically
+      // Place on the outer surface, spread vertically (reuse temp vector)
       const slot = i / Math.max(1, spriteCount - 1);
       const theta = (slot * Math.PI * 1.2) - Math.PI * 0.6;
       const phi = now * 0.00015 + i * 0.4;
       const r = radius + 0.5;
-      const offset = new THREE.Vector3(
+      _tmpOffset.set(
         Math.cos(phi) * r * Math.cos(theta),
         Math.sin(theta) * r * 0.7,
         Math.sin(phi) * r * Math.cos(theta)
       );
-      entry.sprite.position.copy(centroid).add(offset);
+      entry.sprite.position.copy(_tmpCentroid).add(_tmpOffset);
 
-      // Line from sprite to sender node
+      // Line from sprite to sender node (direct buffer write, no clone/setFromPoints)
       const senderIdx = bubble.members.get(entry.msg.peerId);
       if (senderIdx !== undefined && nodes[senderIdx]) {
-        const pts = [entry.sprite.position.clone(), nodes[senderIdx].pos.clone()];
-        entry.line.geometry.setFromPoints(pts);
-        entry.line.geometry.attributes.position.needsUpdate = true;
+        const lAttr = entry.line.geometry.attributes.position;
+        const lArr = lAttr.array;
+        lArr[0] = entry.sprite.position.x;
+        lArr[1] = entry.sprite.position.y;
+        lArr[2] = entry.sprite.position.z;
+        lArr[3] = nodes[senderIdx].pos.x;
+        lArr[4] = nodes[senderIdx].pos.y;
+        lArr[5] = nodes[senderIdx].pos.z;
+        lAttr.needsUpdate = true;
       }
     }
   });

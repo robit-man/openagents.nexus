@@ -26,6 +26,18 @@ export interface NexusConfig {
   useDnsaddr?: boolean;
   useTcpBootstrap?: boolean;
 
+  // NAT traversal (all true by default — resilient cross-network connectivity)
+  /** AutoNAT: detect if behind NAT by asking peers to dial us */
+  enableAutoNAT?: boolean;
+  /** DCUtR: hole-punch through relay for direct connections */
+  enableDcutr?: boolean;
+  /** UPnP NAT: auto-open ports on UPnP-capable routers */
+  enableUpnpNat?: boolean;
+  /** Run relay server regardless of role (lets light nodes relay for peers) */
+  enableRelayServer?: boolean;
+  /** Filter private/loopback addresses from external announcements */
+  filterPrivateAddresses?: boolean;
+
   // Storage
   datastorePath?: string;
 

@@ -565,7 +565,7 @@ scene.add(new THREE.AmbientLight(0x111111, 1));
 // ─────────────────────────────────────────────
 //  NODE MANAGEMENT
 // ─────────────────────────────────────────────
-const nodes      = [];  // { mesh, mat, light, sprite, basePos, orbitAngle, orbitSpeed, orbitAxis, orbitRadius, pulsePhase, birthTime }
+const nodes      = [];  // { mesh, mat, light, sprite, pos, vel, birthTime, lastSeen, fadeOpacity }
 const nodeGroup  = new THREE.Group();
 scene.add(nodeGroup);
 
@@ -574,18 +574,25 @@ scene.add(connGroup);
 const particleGroup = new THREE.Group();
 scene.add(particleGroup);
 
-const connections = []; // { curve, line, particles, ia, ib }
+const connections = []; // { curve, line, particles, ia, ib, weight }
 
-// Fibonacci sphere distribution — deterministic given n and i
-function fibonacciSphere(n, i) {
-  const phi   = Math.acos(1 - 2 * (i + 0.5) / n);
-  const theta = Math.PI * (1 + Math.sqrt(5)) * i;
-  return new THREE.Vector3(
-    Math.sin(phi) * Math.cos(theta),
-    Math.cos(phi),
-    Math.sin(phi) * Math.sin(theta)
-  );
-}
+// ── Cellular diffusion simulation constants ──
+const SIM = {
+  REPULSION:    3.0,    // Coulomb-like repulsion strength
+  SPRING:       0.015,  // spring attraction for connected nodes
+  REST_LENGTH:  3.5,    // target distance for connected pairs
+  CENTERING:    0.003,  // gentle pull toward origin
+  DAMPING:      0.88,   // velocity decay per frame
+  MAX_VEL:      0.25,   // cap velocity to prevent explosions
+  BOUNDARY:     14.0,   // soft sphere boundary radius
+  BOUNDARY_K:   0.05,   // boundary push-back strength
+  MIN_DIST:     0.5,    // minimum distance for repulsion calc
+};
+
+// ── Stale fadeout constants ──
+const FADE_GRACE_MS = 2 * 3600_000;   // 2 hours at full opacity after last seen
+const FADE_TOTAL_MS = 7 * 86400_000;  // 7 days total before fully transparent
+const FADE_RANGE_MS = FADE_TOTAL_MS - FADE_GRACE_MS;
 
 const ORBIT_RADIUS = 7.5;
 const NODE_SIZE    = 0.08; // small spheres — like neurons
@@ -608,14 +615,15 @@ function makeLabelSprite(text) {
 }
 
 function addNode(label, index, total) {
-  const basePos = fibonacciSphere(Math.max(total, 1), index).multiplyScalar(ORBIT_RADIUS);
-
-  // Slight deterministic-looking jitter based on index
-  const jitter = 1.5;
-  const seed   = index * 2.399963; // golden angle-ish
-  basePos.x += Math.sin(seed * 3.1) * jitter;
-  basePos.y += Math.cos(seed * 2.7) * jitter;
-  basePos.z += Math.sin(seed * 1.9) * jitter;
+  // Random initial placement on a sphere shell with jitter — the simulation will settle them
+  const theta = Math.random() * Math.PI * 2;
+  const phi   = Math.acos(2 * Math.random() - 1);
+  const r     = ORBIT_RADIUS * (0.6 + Math.random() * 0.6);
+  const pos = new THREE.Vector3(
+    r * Math.sin(phi) * Math.cos(theta),
+    r * Math.cos(phi),
+    r * Math.sin(phi) * Math.sin(theta)
+  );
 
   const geo = new THREE.SphereGeometry(NODE_SIZE, 24, 24);
   const mat = new THREE.MeshStandardMaterial({
@@ -626,16 +634,16 @@ function addNode(label, index, total) {
     metalness:        0.6,
   });
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(basePos);
+  mesh.position.copy(pos);
   mesh.scale.setScalar(0.001); // animate in
 
   const light = new THREE.PointLight(0xffffff, 0.3, 7);
-  light.position.copy(basePos);
+  light.position.copy(pos);
   nodeGroup.add(light);
   nodeGroup.add(mesh);
 
   const sprite = makeLabelSprite(label);
-  sprite.position.copy(basePos);
+  sprite.position.copy(pos);
   sprite.position.y += NODE_SIZE + 0.55;
   sprite.material.opacity = 0;
   nodeGroup.add(sprite);
@@ -645,9 +653,12 @@ function addNode(label, index, total) {
     mat,
     light,
     sprite,
-    basePos:     basePos.clone(),
+    pos:         pos.clone(),         // current simulation position
+    vel:         new THREE.Vector3(), // velocity for diffusion simulation
     birthTime:   performance.now() + index * 100,
-    blinkUntil:  0, // timestamp — blink bright until this time (set by real ping)
+    blinkUntil:  0,
+    lastSeen:    Date.now(),          // timestamp for stale fadeout
+    fadeOpacity: 1.0,                 // current opacity (1=visible, 0=faded)
   };
 
   nodes.push(node);
@@ -683,28 +694,17 @@ function removeNode(index) {
   nodes[index] = null;
 }
 
-function addConnection(ia, ib) {
+function addConnection(ia, ib, weight) {
   if (ia >= nodes.length || ib >= nodes.length) return;
   const a = nodes[ia];
   const b = nodes[ib];
+  if (!a || !b) return;
 
-  const mid    = new THREE.Vector3().addVectors(a.mesh.position, b.mesh.position).multiplyScalar(0.5);
-  const seed   = (ia * 31 + ib * 17) % 100;
-  mid.x += Math.sin(seed * 0.4) * 2;
-  mid.y += Math.cos(seed * 0.6) * 2;
-  mid.z += Math.sin(seed * 0.3) * 2;
+  const w = weight || 1;
 
-  // Second control point for organic S-curve
-  const mid2 = mid.clone();
-  mid2.x -= Math.cos(seed * 0.8) * 1.5;
-  mid2.y += Math.sin(seed * 0.5) * 1.5;
-  mid2.z -= Math.sin(seed * 0.9) * 1.5;
-
+  // Control points are computed dynamically each frame from current positions
   const curve = new THREE.CubicBezierCurve3(
-    a.mesh.position.clone(),
-    mid,
-    mid2,
-    b.mesh.position.clone()
+    a.pos.clone(), new THREE.Vector3(), new THREE.Vector3(), b.pos.clone()
   );
 
   const pts  = curve.getPoints(64);
@@ -730,7 +730,7 @@ function addConnection(ia, ib) {
     particles.push({ mesh: pmesh, t: (p / particleCount), speed: 0.003 + (ib % 5) * 0.001 });
   }
 
-  connections.push({ curve, line, particles, ia, ib });
+  connections.push({ curve, line, particles, ia, ib, weight: w });
 }
 
 function buildConnections() {
@@ -756,6 +756,91 @@ function buildConnections() {
 }
 
 // ─────────────────────────────────────────────
+//  CELLULAR DIFFUSION SIMULATION
+// ─────────────────────────────────────────────
+const _tmpForce = new THREE.Vector3();
+const _tmpDelta = new THREE.Vector3();
+
+function stepSimulation() {
+  const activeNodes = [];
+  const activeIndices = [];
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i]) { activeNodes.push(nodes[i]); activeIndices.push(i); }
+  }
+  const n = activeNodes.length;
+  if (n === 0) return;
+
+  // Reset forces
+  for (let i = 0; i < n; i++) activeNodes[i]._force = new THREE.Vector3();
+
+  // 1. Repulsion — all pairs (O(n²), fine for < 200 nodes)
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      _tmpDelta.subVectors(activeNodes[i].pos, activeNodes[j].pos);
+      let dist = _tmpDelta.length();
+      if (dist < SIM.MIN_DIST) dist = SIM.MIN_DIST;
+      const force = SIM.REPULSION / (dist * dist);
+      _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(force);
+      activeNodes[i]._force.add(_tmpForce);
+      activeNodes[j]._force.sub(_tmpForce);
+    }
+  }
+
+  // 2. Spring attraction — connected pairs
+  for (const conn of connections) {
+    const a = nodes[conn.ia];
+    const b = nodes[conn.ib];
+    if (!a || !b) continue;
+    _tmpDelta.subVectors(b.pos, a.pos);
+    const dist = _tmpDelta.length();
+    // Weighted rest length: stronger connections → shorter rest length
+    const restLen = SIM.REST_LENGTH / Math.sqrt(conn.weight || 1);
+    const displacement = dist - restLen;
+    const force = SIM.SPRING * displacement * (conn.weight || 1);
+    _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(force);
+    a._force.add(_tmpForce);
+    b._force.sub(_tmpForce);
+  }
+
+  // 3. Centering + boundary
+  for (let i = 0; i < n; i++) {
+    const nd = activeNodes[i];
+    // Gentle centering pull
+    activeNodes[i]._force.add(
+      _tmpForce.copy(nd.pos).negate().multiplyScalar(SIM.CENTERING)
+    );
+    // Soft boundary: push back when beyond BOUNDARY radius
+    const r = nd.pos.length();
+    if (r > SIM.BOUNDARY) {
+      const pushBack = (r - SIM.BOUNDARY) * SIM.BOUNDARY_K;
+      activeNodes[i]._force.add(
+        _tmpForce.copy(nd.pos).normalize().multiplyScalar(-pushBack)
+      );
+    }
+  }
+
+  // 4. Integrate — Euler step with damping
+  for (let i = 0; i < n; i++) {
+    const nd = activeNodes[i];
+    nd.vel.add(nd._force);
+    nd.vel.multiplyScalar(SIM.DAMPING);
+    // Clamp velocity
+    if (nd.vel.length() > SIM.MAX_VEL) nd.vel.setLength(SIM.MAX_VEL);
+    nd.pos.add(nd.vel);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  STALE FADEOUT — compute opacity from lastSeen
+// ─────────────────────────────────────────────
+function computeFadeOpacity(lastSeenMs) {
+  const age = Date.now() - lastSeenMs;
+  if (age <= FADE_GRACE_MS) return 1.0;
+  if (age >= FADE_TOTAL_MS) return 0.0;
+  return 1.0 - ((age - FADE_GRACE_MS) / FADE_RANGE_MS);
+}
+
+// ─────────────────────────────────────────────
 //  ANIMATION LOOP
 // ─────────────────────────────────────────────
 let lastInteract = performance.now();
@@ -768,48 +853,83 @@ canvas.addEventListener('pointerdown', () => {
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
-  const t   = now * 0.001;
 
   if (now - lastInteract > 4000) controls.autoRotate = true;
 
+  // Run cellular diffusion step
+  stepSimulation();
+
+  // Update nodes
   nodes.forEach((nd) => {
-    if (!nd) return; // removed node
+    if (!nd) return;
+
+    // Compute stale fadeout
+    nd.fadeOpacity = computeFadeOpacity(nd.lastSeen);
+
     // Entrance scale-up
     if (now < nd.birthTime + 600) {
       const p    = Math.max(0, (now - nd.birthTime) / 600);
       const ease = 1 - Math.pow(1 - p, 3);
       nd.mesh.scale.setScalar(ease);
-      nd.sprite.material.opacity = ease;
+      nd.sprite.material.opacity = ease * nd.fadeOpacity;
       return;
     }
-    nd.mesh.scale.setScalar(1);
-    nd.sprite.material.opacity = 0.7;
 
-    // No drift — nodes stay fixed at basePos
-    nd.mesh.position.copy(nd.basePos);
-    nd.light.position.copy(nd.basePos);
-    nd.sprite.position.copy(nd.basePos);
+    const opacity = nd.fadeOpacity;
+    nd.mesh.scale.setScalar(opacity); // shrink as they fade
+    nd.sprite.material.opacity = 0.7 * opacity;
+    nd.mat.opacity = opacity;
+    nd.mat.transparent = opacity < 1.0;
+    nd.light.intensity *= opacity;
+
+    // Apply simulation position
+    nd.mesh.position.copy(nd.pos);
+    nd.light.position.copy(nd.pos);
+    nd.sprite.position.copy(nd.pos);
     nd.sprite.position.y += NODE_SIZE + 0.45;
 
     // Blink from real ping — bright when blinkUntil > now, dim otherwise
     if (nd.blinkUntil > now) {
-      const fade = (nd.blinkUntil - now) / 400; // 400ms fade
-      nd.mat.emissiveIntensity = 0.6 * Math.min(1, fade);
-      nd.light.intensity = 0.5 * Math.min(1, fade);
+      const fade = (nd.blinkUntil - now) / 400;
+      nd.mat.emissiveIntensity = 0.6 * Math.min(1, fade) * opacity;
+      nd.light.intensity = 0.5 * Math.min(1, fade) * opacity;
     } else {
-      nd.mat.emissiveIntensity = 0.04;
-      nd.light.intensity = 0.08;
+      nd.mat.emissiveIntensity = 0.04 * opacity;
+      nd.light.intensity = 0.08 * opacity;
     }
   });
 
-  // Update connection curves and particles
+  // Update connection curves and particles (follow live node positions)
   connections.forEach(c => {
     if (c.ia >= nodes.length || c.ib >= nodes.length) return;
     const a = nodes[c.ia];
     const b = nodes[c.ib];
+    if (!a || !b) return;
 
-    c.curve.v0.copy(a.mesh.position);
-    c.curve.v2.copy(b.mesh.position);
+    // Recompute Bezier control points from current positions
+    const seed = (c.ia * 31 + c.ib * 17) % 100;
+    const mid = new THREE.Vector3().addVectors(a.pos, b.pos).multiplyScalar(0.5);
+    mid.x += Math.sin(seed * 0.4) * 1.5;
+    mid.y += Math.cos(seed * 0.6) * 1.5;
+    mid.z += Math.sin(seed * 0.3) * 1.5;
+    const mid2 = mid.clone();
+    mid2.x -= Math.cos(seed * 0.8) * 1.0;
+    mid2.y += Math.sin(seed * 0.5) * 1.0;
+    mid2.z -= Math.sin(seed * 0.9) * 1.0;
+
+    c.curve.v0.copy(a.pos);
+    c.curve.v1.copy(mid);
+    c.curve.v2.copy(mid2);
+    c.curve.v3.copy(b.pos);
+
+    // Rebuild line geometry from updated curve
+    const pts = c.curve.getPoints(64);
+    c.line.geometry.setFromPoints(pts);
+    c.line.geometry.attributes.position.needsUpdate = true;
+
+    // Fade connections with the dimmest connected node
+    const connOpacity = Math.min(a.fadeOpacity, b.fadeOpacity);
+    c.line.material.opacity = ((c.ia + c.ib) % 4 === 0 ? 0.35 : 0.18) * connOpacity;
 
     c.particles.forEach(p => {
       p.t += p.speed;
@@ -817,7 +937,7 @@ function animate() {
       const pos  = c.curve.getPoint(p.t);
       p.mesh.position.copy(pos);
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
-      p.mesh.material.opacity = 0.45 + 0.5 * wave;
+      p.mesh.material.opacity = (0.45 + 0.5 * wave) * connOpacity;
     });
   });
 
@@ -1130,11 +1250,13 @@ function buildSceneFromBootstrap(bootstrapPeers) {
 
   unique.forEach(({ hostname }, i) => {
     const label = extractShortLabel(hostname);
-    addNode(label, i, unique.length);
+    const nd = addNode(label, i, unique.length);
+    // Bootstrap infrastructure never fades — keep lastSeen always fresh
+    nd.lastSeen = Date.now() + FADE_TOTAL_MS;
   });
 
   // No connections built — bootstrap nodes sit as static points
-  // Connections + particles only appear when real agents connect via reconcileNetworkPeers
+  // Connections + particles only appear when real agents connect
 }
 
 // ─────────────────────────────────────────────
@@ -1163,19 +1285,17 @@ function reconcileAgents(networkData) {
       (agent.model?.name ? ` [${agent.model.name}]` : ''));
   });
 
-  // Build connections between live agents (not bootstrap nodes)
+  // Build connections between live agents (weighted by interaction)
   if (added > 0 && knownAgents.size >= 2) {
-    const agentIndices = Array.from(knownAgents.values()).map(a => a.index);
-    // Connect live agents to each other
-    for (let i = 0; i < agentIndices.length; i++) {
-      for (let j = i + 1; j < agentIndices.length; j++) {
-        // Check if they share a room
-        const a = Array.from(knownAgents.values())[i].data;
-        const b = Array.from(knownAgents.values())[j].data;
-        const sharedRooms = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
-        if (sharedRooms.length > 0) {
-          addConnection(agentIndices[i], agentIndices[j]);
-        }
+    const agentArr = Array.from(knownAgents.values());
+    for (let i = 0; i < agentArr.length; i++) {
+      for (let j = i + 1; j < agentArr.length; j++) {
+        const a = agentArr[i].data;
+        const b = agentArr[j].data;
+        const shared = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
+        const sharedCaps = (a.capabilities || []).filter(c => (b.capabilities || []).includes(c));
+        const weight = shared.length + sharedCaps.length * 0.5;
+        if (weight > 0) addConnection(agentArr[i].index, agentArr[j].index, weight);
       }
     }
   }
@@ -1275,21 +1395,26 @@ async function loadDirectory() {
 
       const label = agent.agentName || agent.peerId.slice(0, 8);
       const idx = nodes.length;
-      addNode(label, idx, nodes.length + agents.length);
+      const nd = addNode(label, idx, nodes.length + agents.length);
+      // Use KV lastSeen if available, otherwise current time
+      nd.lastSeen = agent.lastSeen || agent.updatedAt || Date.now();
       knownAgents.set(agent.peerId, { index: idx, data: agent });
 
       // Sidebar card
       renderNatsAgentCard(agent);
     });
 
-    // Build connections between directory agents sharing rooms
+    // Build connections between directory agents sharing rooms (weight by shared count)
     const agentArr = Array.from(knownAgents.values());
     for (let i = 0; i < agentArr.length; i++) {
       for (let j = i + 1; j < agentArr.length; j++) {
         const a = agentArr[i].data;
         const b = agentArr[j].data;
         const shared = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
-        if (shared.length > 0) addConnection(agentArr[i].index, agentArr[j].index);
+        // Also count shared capabilities as interaction signal
+        const sharedCaps = (a.capabilities || []).filter(c => (b.capabilities || []).includes(c));
+        const weight = shared.length + sharedCaps.length * 0.5;
+        if (weight > 0) addConnection(agentArr[i].index, agentArr[j].index, weight);
       }
     }
 
@@ -1320,47 +1445,46 @@ fetchBootstrap().then(() => {
 //  NATS BROWSER CONNECTION — live agent discovery
 // ─────────────────────────────────────────────
 const natsAgents = new Map(); // peerId -> { ...announcement, lastSeen }
-const STALE_TIMEOUT = 90_000; // 90s — 3x the 30s announce interval
+const STALE_SIDEBAR_MS = 90_000; // 90s — remove sidebar card (no heartbeat)
 
-// Sweep stale agents every 30s — remove agents not seen in 90s
+// Sweep every 30s — handle sidebar removal + full fadeout removal
 setInterval(() => {
   const now = Date.now();
-  const stale = [];
+
+  // 1. Remove sidebar cards for agents not seen in 90s (NATS heartbeat timeout)
   for (const [peerId, entry] of natsAgents) {
-    if (now - (entry.lastSeen || 0) > STALE_TIMEOUT) {
-      stale.push(peerId);
+    if (now - (entry.lastSeen || 0) > STALE_SIDEBAR_MS) {
+      const name = entry.agentName || peerId.slice(0, 8);
+      natsAgents.delete(peerId);
+
+      // Remove sidebar card only — 3D node stays and fades over time
+      const card = nodesList.querySelector(`[data-peer="${peerId}"]`);
+      if (card) card.remove();
+
+      const natsDropdown = document.getElementById('nats-agents-dropdown');
+      if (natsDropdown) {
+        const count = natsDropdown.querySelectorAll('.peer-card').length;
+        const summary = natsDropdown.querySelector('summary');
+        if (summary) summary.textContent = `live agents (${count})`;
+      }
+
+      pushLog(`<span style="color:#666">${name}</span> went offline`);
     }
   }
-  for (const peerId of stale) {
-    const name = natsAgents.get(peerId)?.agentName || peerId.slice(0, 8);
-    natsAgents.delete(peerId);
 
-    // Remove from 3D scene
-    const agent = knownAgents.get(peerId);
-    if (agent) {
+  // 2. Fully remove 3D nodes that have faded to zero (1 week stale)
+  for (const [peerId, agent] of knownAgents) {
+    const nd = nodes[agent.index];
+    if (!nd) { knownAgents.delete(peerId); continue; }
+    if (nd.fadeOpacity <= 0) {
       removeNode(agent.index);
       knownAgents.delete(peerId);
+      natsAgents.delete(peerId);
+      pushLog(`<span style="color:#444">${agent.data?.agentName || peerId.slice(0, 8)}</span> expired (1 week stale)`);
     }
-
-    // Remove sidebar card
-    const card = nodesList.querySelector(`[data-peer="${peerId}"]`);
-    if (card) card.remove();
-
-    // Update live agents dropdown count
-    const natsDropdown = document.getElementById('nats-agents-dropdown');
-    if (natsDropdown) {
-      const count = natsDropdown.querySelectorAll('.peer-card').length;
-      const summary = natsDropdown.querySelector('summary');
-      if (summary) summary.textContent = `live agents (${count})`;
-    }
-
-    pushLog(`<span style="color:#666">${name}</span> went offline`);
   }
 
-  // Update dials if agents were removed
-  if (stale.length > 0) {
-    setDial('dial-peers-arc', 'dial-peers-val', (natsAgents.size / 100) * 100, String(natsAgents.size));
-  }
+  setDial('dial-peers-arc', 'dial-peers-val', (natsAgents.size / 100) * 100, String(natsAgents.size));
 }, 30_000);
 
 async function connectNats() {
@@ -1382,6 +1506,12 @@ async function connectNats() {
           const isNew = !natsAgents.has(ann.peerId);
           natsAgents.set(ann.peerId, { ...ann, lastSeen: Date.now() });
 
+          // Refresh lastSeen on the 3D node (heartbeat keeps it visible)
+          const existingAgent = knownAgents.get(ann.peerId);
+          if (existingAgent && nodes[existingAgent.index]) {
+            nodes[existingAgent.index].lastSeen = Date.now();
+          }
+
           if (isNew) {
             const label = ann.agentName || ann.peerId.slice(0, 8);
             pushLog(`<span class="log-highlight">${label}</span> discovered via NATS`);
@@ -1391,15 +1521,18 @@ async function connectNats() {
             addNode(label, idx, nodes.length + 1);
             knownAgents.set(ann.peerId, { index: idx, data: ann });
 
-            // Build connections between agents sharing rooms
+            // Build connections between new agent and existing agents (weight by interaction)
             if (knownAgents.size >= 2) {
               const agentArr = Array.from(knownAgents.values());
+              const newest = agentArr[agentArr.length - 1];
               for (let i = 0; i < agentArr.length - 1; i++) {
                 const a = agentArr[i].data;
-                const b = agentArr[agentArr.length - 1].data;
+                const b = newest.data;
                 const shared = (a.rooms || []).filter(r => (b.rooms || []).includes(r));
-                if (shared.length > 0) {
-                  addConnection(agentArr[i].index, agentArr[agentArr.length - 1].index);
+                const sharedCaps = (a.capabilities || []).filter(c => (b.capabilities || []).includes(c));
+                const weight = shared.length + sharedCaps.length * 0.5;
+                if (weight > 0) {
+                  addConnection(agentArr[i].index, newest.index, weight);
                 }
               }
             }

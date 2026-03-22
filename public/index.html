@@ -581,9 +581,10 @@ const SIM = {
 };
 
 // ── Stale fadeout constants ──
-const FADE_GRACE_MS = 2 * 3600_000;   // 2 hours at full opacity after last seen
-const FADE_TOTAL_MS = 7 * 86400_000;  // 7 days total before fully transparent
+const FADE_GRACE_MS = 5 * 60_000;     // 5 minutes at full opacity after last seen
+const FADE_TOTAL_MS = 2 * 3600_000;   // 2 hours total before fully transparent
 const FADE_RANGE_MS = FADE_TOTAL_MS - FADE_GRACE_MS;
+const COHERE_COLOR  = 0xffae00;       // amber — COHERE participating nodes
 
 const ORBIT_RADIUS = 7.5;
 const NODE_SIZE    = 0.08; // small spheres — like neurons
@@ -779,6 +780,7 @@ function addNode(label, index, total, isAgent) {
     _icoGeo:     isAgent ? geo : null,
     _icoOrig:    origPositions,
     _phase:      Math.random() * Math.PI * 2, // unique phase offset per agent
+    _cohere:     false,              // COHERE participation flag
   };
 
   nodes.push(node);
@@ -1270,6 +1272,24 @@ function stepSimulation() {
 }
 
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+//  COHERE NODE HIGHLIGHTING
+// ─────────────────────────────────────────────
+function setCohereState(nodeIdx, active) {
+  const nd = nodes[nodeIdx];
+  if (!nd) return;
+  nd._cohere = active;
+  if (active) {
+    nd.mat.color.setHex(COHERE_COLOR);
+    nd.mat.emissive.setHex(COHERE_COLOR);
+    nd.mat.emissiveIntensity = 1.8;
+  } else {
+    nd.mat.color.setHex(0xffffff);
+    nd.mat.emissive.setHex(0xffffff);
+    nd.mat.emissiveIntensity = nd._isAgent ? 1.2 : 0.35;
+  }
+}
+
 //  STALE FADEOUT — compute opacity from lastSeen
 // ─────────────────────────────────────────────
 function computeFadeOpacity(lastSeenMs) {

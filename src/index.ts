@@ -1464,6 +1464,10 @@ export type {
 
 // COHERE Part II Tier 3: Two-Balance Model (Plane 3)
 export { DualBalanceManager } from './x402/balance.js';
+
+// COHERE Part II: Epoch Synchronization Runtime (Plane 4, p.49)
+export { EpochSyncOrchestrator, DEFAULT_EPOCH_CONFIG } from './storage/epoch-sync.js';
+export type { EpochPhase, DeltaProposal, EpochState, EpochSyncConfig } from './storage/epoch-sync.js';
 export type {
   DualBalance,
   BalanceTransaction,

@@ -168,17 +168,54 @@
   #nodes-list::-webkit-scrollbar { width: 4px; }
   #nodes-list::-webkit-scrollbar-thumb { background: var(--grey-muted); border-radius: 2px; }
 
+  /* Fade-out gradient mask at bottom of agent list */
+  #nodes-list {
+    -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+  }
+
   .peer-card {
     border: none;
     padding: 6px 10px;
     margin-bottom: 2px;
     background: transparent;
-    transition: background 0.2s;
-    cursor: default;
+    transition: background 0.2s, max-height 0.3s ease;
+    cursor: pointer;
+    border-radius: 4px;
+    max-height: 60px;
+    overflow: hidden;
+  }
+  .peer-card.expanded {
+    max-height: 400px;
+    background: rgba(255,255,255,0.06);
   }
   .peer-card:hover {
     background: rgba(255,255,255,0.04);
   }
+  .peer-card .peer-details {
+    display: none;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    font-size: 9px;
+    color: #888;
+    line-height: 1.6;
+  }
+  .peer-card.expanded .peer-details {
+    display: block;
+  }
+  .peer-card .peer-status {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .peer-card .peer-status.online { background: #0f0; }
+  .peer-card .peer-status.idle { background: #ff0; }
+  .peer-card .peer-status.stale { background: #666; }
+  .peer-card .peer-status.cohere { background: #ffae00; }
 
   .peer-name {
     display: flex;
@@ -2020,26 +2057,50 @@ function renderAgentCards(agents) {
     card.setAttribute('role', 'listitem');
 
     const name = agent.agentName || 'anonymous';
-    const shortId = agent.peerId.slice(0, 8);
+    const shortId = agent.peerId.slice(0, 12);
     const model = agent.model?.name || '';
     const params = agent.model?.params || '';
     const gpu = agent.system?.gpu || '';
     const tps = agent.model?.tokensPerSecond ? `${agent.model.tokensPerSecond} tok/s` : '';
     const rooms = (agent.rooms || []).join(', ') || 'none';
 
+    // Determine status based on lastSeen age
+    const lastSeen = agent.registeredAt || Date.now();
+    const ageSec = (Date.now() - lastSeen) / 1000;
+    let statusClass = 'online';
+    let statusLabel = 'online';
+    if (ageSec > 3600) { statusClass = 'stale'; statusLabel = 'stale'; }
+    else if (ageSec > 300) { statusClass = 'idle'; statusLabel = 'idle'; }
+
+    // Check for COHERE participation (amber dot)
+    const isCohere = agent.agentType === 'cohere' || (agent.rooms || []).includes('cohere');
+    if (isCohere) { statusClass = 'cohere'; statusLabel = 'cohere'; }
+
     card.innerHTML = `
       <div class="peer-name">
-        <div class="peer-dot" style="background:#fff;box-shadow:0 0 4px #fff"></div>
-        <div class="peer-name-text">${name}</div>
+        <span class="peer-status ${statusClass}"></span>
+        <div class="peer-name-text" style="font-size:10px">${name}</div>
       </div>
       <div class="peer-meta">
-        <div class="peer-meta-item">${shortId}...</div>
-        <div class="peer-meta-item">${rooms}</div>
-        ${model ? `<div class="peer-meta-item"><strong>${model}</strong> ${params}</div>` : ''}
-        ${tps ? `<div class="peer-meta-item">${tps}</div>` : ''}
-        ${gpu ? `<div class="peer-meta-item" style="grid-column:1/-1">${gpu}</div>` : ''}
+        <div class="peer-meta-item" style="font-size:8px;color:#555">${shortId}...</div>
+      </div>
+      <div class="peer-details">
+        <div><strong>Peer ID:</strong> ${agent.peerId}</div>
+        <div><strong>Status:</strong> ${statusLabel}</div>
+        <div><strong>Rooms:</strong> ${rooms}</div>
+        ${model ? `<div><strong>Model:</strong> ${model} ${params}</div>` : '<div><strong>Model:</strong> —</div>'}
+        ${tps ? `<div><strong>Speed:</strong> ${tps}</div>` : ''}
+        ${gpu ? `<div><strong>GPU:</strong> ${gpu}</div>` : ''}
+        <div><strong>Type:</strong> ${agent.agentType || 'general'}</div>
+        ${agent.capabilities?.length ? `<div><strong>Capabilities:</strong> ${agent.capabilities.join(', ')}</div>` : ''}
       </div>
     `;
+
+    // Click to expand/collapse
+    card.addEventListener('click', () => {
+      card.classList.toggle('expanded');
+    });
+
     nodesList.appendChild(card);
   });
 }

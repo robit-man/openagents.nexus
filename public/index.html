@@ -619,10 +619,13 @@ const COMM_BOOST = 3.0;           // boost per message event
 
 // ── Room detail levels — adaptive resolution based on participant count ──
 const ROOM_DETAIL = { MINIMAL: 0, SMALL: 1, MEDIUM: 2 };
-function getRoomDetail(memberCount) {
-  if (memberCount <= 1) return ROOM_DETAIL.MINIMAL;  // 20 faces — sparse icosahedron
-  if (memberCount <= 4) return ROOM_DETAIL.SMALL;    // 80 faces
-  return ROOM_DETAIL.MEDIUM;                          // 320 faces
+function getRoomDetail(memberCount, messageCount = 0) {
+  // Expand geometry when messages need more vertex attachment points
+  // IcosahedronGeometry vertex counts: detail 0=12, 1=42, 2=162, 3=642
+  const neededVerts = Math.max(memberCount, messageCount);
+  if (neededVerts > 42) return ROOM_DETAIL.MEDIUM;   // 162 vertices
+  if (neededVerts > 12) return ROOM_DETAIL.SMALL;    // 42 vertices
+  return ROOM_DETAIL.MINIMAL;                         // 12 vertices
 }
 
 // ── Central core icosahedron — violently undulating light emitter ──
@@ -1151,6 +1154,22 @@ function addRoomMessage(roomId, peerId, agentName, content) {
   const slot = bubble.messageSprites.length;
   bubble.messageSprites.push({ sprite, outerLine, innerLine, msg, slot });
 
+  // Auto-expand room geometry if messages exceed vertex count
+  const posAttr = bubble.mesh.geometry.attributes.position;
+  const vertCount = posAttr ? posAttr.count : 12;
+  if (bubble.messageSprites.length > vertCount) {
+    const newDetail = getRoomDetail(bubble.members.size, bubble.messageSprites.length);
+    if (bubble._detail !== newDetail) {
+      bubble._detail = newDetail;
+      const oldGeo = bubble.mesh.geometry;
+      const newGeo = new THREE.IcosahedronGeometry(1, newDetail);
+      bubble.mesh.geometry = newGeo;
+      bubble.wireMesh.geometry = newGeo;
+      bubble._basePositions = null;
+      oldGeo?.dispose();
+    }
+  }
+
   pushLog('<span class="log-highlight">' + agentName + '</span> in <span class="log-room">' + roomId + '</span>: ' + content.slice(0, 80));
 }
 
@@ -1658,27 +1677,50 @@ function animate() {
       entry.outerLine.material.opacity = opacity * 0.25;
       entry.innerLine.material.opacity = opacity * 0.18;
 
-      // Compute boundary attachment point — unique angle per message slot
-      const theta = (entry.slot / Math.max(1, MAX_ROOM_MESSAGES)) * Math.PI * 1.6 - Math.PI * 0.8;
-      const phi = entry.slot * 0.7 + 0.3;
-      _tmpDir.set(
-        Math.cos(phi) * Math.cos(theta),
-        Math.sin(theta) * 0.7,
-        Math.sin(phi) * Math.cos(theta)
-      ).normalize();
+      // Compute boundary attachment — pin to actual vertex on room geometry
+      // Use the room's icosahedral geometry vertices for attachment points
+      const posAttr = bubble.mesh.geometry.attributes.position;
+      const vertCount = posAttr ? posAttr.count : 12;
+      const vertIdx = entry.slot % vertCount;
+
+      // Get vertex position from geometry (in local space)
+      let vx = 0, vy = 0, vz = 0;
+      if (posAttr && vertIdx < posAttr.count) {
+        vx = posAttr.getX(vertIdx);
+        vy = posAttr.getY(vertIdx);
+        vz = posAttr.getZ(vertIdx);
+      } else {
+        // Fallback: spherical distribution
+        const theta2 = (entry.slot / Math.max(1, MAX_ROOM_MESSAGES)) * Math.PI * 1.6 - Math.PI * 0.8;
+        const phi2 = entry.slot * 0.7 + 0.3;
+        vx = Math.cos(phi2) * Math.cos(theta2);
+        vy = Math.sin(theta2) * 0.7;
+        vz = Math.sin(phi2) * Math.cos(theta2);
+      }
+
+      // Normalize vertex direction
+      _tmpDir.set(vx, vy, vz).normalize();
 
       // Boundary point: centroid + direction * radius
       const bx = _tmpCentroid.x + _tmpDir.x * radius;
       const by = _tmpCentroid.y + _tmpDir.y * radius;
       const bz = _tmpCentroid.z + _tmpDir.z * radius;
 
-      // Tag sprite: just outside the boundary
-      const tagOffset = 1.8;
+      // Age-based distance: newer messages farther out, older closer to surface
+      const totalMsgs = bubble.messageSprites.length;
+      const msgIdx = bubble.messageSprites.indexOf(entry);
+      const ageRatio = totalMsgs > 1 ? msgIdx / (totalMsgs - 1) : 0; // 0=oldest, 1=newest
+      const tagOffset = 0.8 + ageRatio * 2.5; // old=0.8, new=3.3
+      const tagScale = 0.4 + ageRatio * 0.8; // old=0.4, new=1.2
+      const tagOpacity = 0.2 + ageRatio * 0.8; // old=0.2, new=1.0
+
       entry.sprite.position.set(
         bx + _tmpDir.x * tagOffset,
         by + _tmpDir.y * tagOffset,
         bz + _tmpDir.z * tagOffset
       );
+      entry.sprite.scale.setScalar(tagScale * 2.0);
+      if (entry.sprite.material) entry.sprite.material.opacity = tagOpacity;
 
       // Outer tether: tag sprite → boundary point
       const oAttr = entry.outerLine.geometry.attributes.position;

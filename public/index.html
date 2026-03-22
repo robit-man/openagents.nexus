@@ -2382,9 +2382,10 @@ function renderAgentCards(agents) {
     const caps = agent.capabilities || [];
     const price = agent.pricing || agent.inferencePrice || null;
 
-    // Status
-    const lastSeen = agent.lastSeen || agent.registeredAt || Date.now();
-    const ageSec = (Date.now() - lastSeen) / 1000;
+    // Status — use 0 as default so agents without heartbeats show as stale,
+    // not falsely green. Prevents the all-green flicker on each reconcile cycle.
+    const lastSeen = agent.lastSeen || agent.registeredAt || 0;
+    const ageSec = lastSeen > 0 ? (Date.now() - lastSeen) / 1000 : 999999;
     let statusClass = 'online';
     if (ageSec > 3600) statusClass = 'stale';
     else if (ageSec > 300) statusClass = 'idle';
@@ -3424,61 +3425,23 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     // Generate a query ID for meshnet correlation
     const queryId = 'q-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
-    // ── Network-first routing ──────────────────────────────────────────
-    // Strategy: prefer COHERE meshnet nodes over local Ollama.
-    //   1. If NATS is connected and nodes are available, broadcast to meshnet
-    //   2. Wait up to 8s for a network response (gentle load-balancing via NATS pub)
-    //   3. Fall back to local Ollama only if no network response arrives
+    // ── Local-first + meshnet broadcast ──────────────────────────────
+    // Strategy: try local Ollama immediately (fast, works when viewing locally),
+    // simultaneously broadcast to meshnet for distributed resolution.
+    // If local fails, wait briefly for meshnet response before giving up.
     //
     // Security: query routing is isolated from identity kernel.
     // nexus.cohere.query carries ONLY the user query and queryId.
-    // Identity kernel data never flows through the query channel.
 
-    const hasNetworkNodes = natsAgents.size > 0;
+    // Broadcast to meshnet in parallel (non-blocking, best-effort)
     const meshnetSent = broadcastToMeshnet(text, queryId);
-
-    if (meshnetSent && hasNetworkNodes) {
-      // Network-first: wait for meshnet response with timeout
-      chatStatus.textContent = 'routing via meshnet (' + natsAgents.size + ' node' + (natsAgents.size !== 1 ? 's' : '') + ')...';
-      chatStatus.style.color = '#4dabf7';
-      pushLog('COHERE query routed to <span class="log-highlight">meshnet</span> (' + natsAgents.size + ' nodes)');
-
-      // Set a timeout: if no meshnet response in 8s, fall back to local Ollama
-      const meshTimeout = setTimeout(async () => {
-        window._cohereMeshnetTimeout = null;
-        // No meshnet response — fall back to local
-        chatStatus.textContent = 'meshnet timeout, trying local...';
-        chatStatus.style.color = '#ffae00';
-        pushLog('Meshnet timeout — <span class="log-highlight">falling back to local Ollama</span>');
-
-        try {
-          await resolveViaLocalOllama();
-        } catch (err) {
-          const errMsg = err.message || 'unknown error';
-          const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
-          removeTypingIndicator();
-          if (isNetworkErr) {
-            addMessage('No network or local inference available. ' + natsAgents.size + ' meshnet node(s) did not respond. Run `oa` with `/cohere` to contribute.', 'agent', 'info');
-          } else {
-            addMessage('Error: ' + errMsg, 'agent', 'error');
-          }
-        }
-
-        chatStatus.textContent = 'distributed mind';
-        chatStatus.style.color = '#555';
-        chatSend.disabled = false;
-        isSending = false;
-        chatInput.focus();
-      }, 8000);
-
-      window._cohereMeshnetTimeout = meshTimeout;
-      return; // Wait for meshnet or timeout — don't fall through to local
-    }
-
-    // No network nodes available or NATS not connected — go direct to local
     if (meshnetSent) {
-      pushLog('COHERE query broadcast to <span class="log-highlight">nexus.cohere.query</span> (no active nodes, also trying local)');
+      pushLog('COHERE query broadcast to <span class="log-highlight">meshnet</span> (' + natsAgents.size + ' nodes)');
     }
+
+    // Try local Ollama first (instant if available)
+    chatStatus.textContent = 'resolving...';
+    chatStatus.style.color = '#ffae00';
 
     try {
       await resolveViaLocalOllama();
@@ -3486,25 +3449,27 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       const errMsg = err.message || 'unknown error';
       const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
 
-      if (isNetworkErr && meshnetSent) {
-        chatStatus.textContent = 'awaiting meshnet...';
-        chatStatus.style.color = '#ffae00';
+      if (isNetworkErr && meshnetSent && natsAgents.size > 0) {
+        // Local unavailable, meshnet query is out — wait for distributed response
+        chatStatus.textContent = 'awaiting meshnet (' + natsAgents.size + ' nodes)...';
+        chatStatus.style.color = '#4dabf7';
         const meshTimeout = setTimeout(() => {
+          window._cohereMeshnetTimeout = null;
           removeTypingIndicator();
-          addMessage('No local inference and no COHERE meshnet responses. ' +
-            String(natsAgents.size) + ' node(s) reachable. ' +
-            'Run `oa` with `/cohere` enabled to contribute inference.', 'agent', 'meshnet');
+          addMessage('No local Ollama running here. Meshnet query sent to ' +
+            natsAgents.size + ' node(s) but none responded with inference. ' +
+            'Run `oa` locally with `/cohere` to enable distributed inference.', 'agent', 'info');
           chatStatus.textContent = 'distributed mind';
           chatStatus.style.color = '#555';
           chatSend.disabled = false;
           isSending = false;
           chatInput.focus();
-        }, 15000);
+        }, 10000);
         window._cohereMeshnetTimeout = meshTimeout;
         return;
       } else if (isNetworkErr) {
         removeTypingIndicator();
-        addMessage('No local Ollama and no COHERE meshnet nodes reachable. Start `oa` with `/cohere` to participate in the distributed mind.', 'agent', 'info');
+        addMessage('No local Ollama detected. Install Ollama and run a model, or start `oa` with `/cohere` to join the meshnet.', 'agent', 'info');
       } else {
         removeTypingIndicator();
         addMessage('Error: ' + errMsg, 'agent', 'error');

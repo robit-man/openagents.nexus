@@ -30,6 +30,14 @@ export interface NatsAgentAnnouncement {
   timestamp: number;
   services?: string[];
   capabilities?: string[];
+  /** COHERE identity kernel — hash of the SelfState object (SHA-256, hex) */
+  identityHash?: string;
+  /** COHERE identity kernel — IPFS CID of the latest SelfState snapshot */
+  identityCid?: string;
+  /** COHERE identity kernel — version number from SelfState.version */
+  identityVersion?: number;
+  /** COHERE identity kernel — coherence score from homeostasis (0-1) */
+  identityCoherence?: number;
 }
 
 /**

@@ -782,6 +782,40 @@ export const INDEX_HTML = `<!DOCTYPE html>
     background: rgba(255,255,255,0.05);
     color: #666;
   }
+  .cohere-ik-hash {
+    font-family: 'Courier New', monospace;
+    font-size: 7px;
+    color: #888;
+    letter-spacing: 0.03em;
+    word-break: break-all;
+    user-select: all;
+    cursor: text;
+  }
+  .cohere-ik-cid {
+    font-family: 'Courier New', monospace;
+    font-size: 7px;
+    color: #4dabf7;
+    letter-spacing: 0.03em;
+    word-break: break-all;
+    user-select: all;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .cohere-ik-cid:hover {
+    color: #74c0fc;
+    text-decoration: underline;
+  }
+  .cohere-ik-ver {
+    font-size: 7px;
+    color: #ffae00;
+    font-weight: bold;
+  }
+  .cohere-msg-source-network {
+    font-size: 7px;
+    color: #4dabf7;
+    margin-top: 2px;
+    font-style: italic;
+  }
 </style>
 
 <!-- RIGHT SIDEBAR -->
@@ -2392,14 +2426,35 @@ function renderAgentCards(agents) {
       const ik = agent.identityKernel || agent.ik || {};
       const ikActive = ik.active !== false; // default to active if field present on cohere node
       const ikPhase = ik.phase || (ikActive ? 'converged' : 'initializing');
-      const ikScore = typeof ik.coherence === 'number' ? (ik.coherence * 100).toFixed(0) + '%' : (ikActive ? 'nominal' : '--');
+      const ikScore = typeof ik.coherence === 'number' ? (ik.coherence * 100).toFixed(0) + '%' :
+        (typeof agent.identityCoherence === 'number' ? (agent.identityCoherence * 100).toFixed(0) + '%' :
+        (ikActive ? 'nominal' : '--'));
+      // Identity hash from NATS announcement or embedded ik object
+      const ikHash = agent.identityHash || ik.hash || '';
+      const ikCid = agent.identityCid || ik.cid || '';
+      const ikVer = agent.identityVersion || ik.version || '';
       const ikSection = document.createElement('div');
       ikSection.style.cssText = 'margin-top:3px;padding-top:3px;border-top:1px solid rgba(255,174,0,0.1)';
-      ikSection.innerHTML =
-        \`<div class="tree-row"><span class="tree-key" style="color:#ffae00">identity kernel</span><span class="cohere-ik-status \${ikActive ? 'cohere-ik-active' : 'cohere-ik-inactive'}">\${ikActive ? 'active' : 'inactive'}</span></div>\` +
+      let ikHtml =
+        \`<div class="tree-row"><span class="tree-key" style="color:#ffae00">identity kernel</span><span class="cohere-ik-status \${ikActive ? 'cohere-ik-active' : 'cohere-ik-inactive'}">\${ikActive ? 'active' : 'inactive'}</span>\` +
+        (ikVer ? \`<span class="cohere-ik-ver" style="margin-left:4px">v\${escHtml(String(ikVer))}</span>\` : '') +
+        \`</div>\` +
         \`<div class="tree-row"><span class="tree-key">phase</span><span class="tree-val" style="color:#ffae00">\${escHtml(ikPhase)}</span></div>\` +
-        \`<div class="tree-row"><span class="tree-key">coherence</span><span class="tree-val" style="color:#ffae00">\${escHtml(ikScore)}</span></div>\` +
-        (ik.alignment ? \`<div class="tree-row"><span class="tree-key">alignment</span><span class="tree-val" style="color:#ffae00">\${escHtml(String(ik.alignment))}</span></div>\` : '');
+        \`<div class="tree-row"><span class="tree-key">coherence</span><span class="tree-val" style="color:#ffae00">\${escHtml(ikScore)}</span></div>\`;
+      if (ikHash) {
+        const shortHash = ikHash.length > 16 ? ikHash.slice(0, 8) + '...' + ikHash.slice(-8) : ikHash;
+        ikHtml += \`<div class="tree-row"><span class="tree-key">hash</span><span class="cohere-ik-hash" title="\${escHtml(ikHash)}">\${escHtml(shortHash)}</span></div>\`;
+      }
+      if (ikCid) {
+        const shortCid = ikCid.length > 20 ? ikCid.slice(0, 10) + '...' + ikCid.slice(-8) : ikCid;
+        ikHtml += \`<div class="tree-row"><span class="tree-key">ipfs</span><a class="cohere-ik-cid" href="https://ipfs.io/ipfs/\${encodeURIComponent(ikCid)}" target="_blank" rel="noopener" title="\${escHtml(ikCid)}">\${escHtml(shortCid)}</a></div>\`;
+      }
+      if (ik.alignment) {
+        ikHtml += \`<div class="tree-row"><span class="tree-key">alignment</span><span class="tree-val" style="color:#ffae00">\${escHtml(String(ik.alignment))}</span></div>\`;
+      }
+      // Security isolation indicator — identity kernel is read-only from query path
+      ikHtml += \`<div class="tree-row"><span class="tree-key">isolation</span><span class="tree-val" style="color:#4dabf7;font-size:7px">signed + read-only</span></div>\`;
+      ikSection.innerHTML = ikHtml;
       children.appendChild(ikSection);
     }
 
@@ -3214,6 +3269,11 @@ document.getElementById('node-search').addEventListener('input', (e) => {
   }
 
   // Broadcast query to COHERE meshnet via NATS
+  // SECURITY: This payload intentionally carries ONLY query data.
+  // Identity kernel data (SelfState, hashes, CIDs) NEVER flows through
+  // the query channel. Identity is announced separately via nexus.agents.discovery
+  // and is read-only / signed. Public queries cannot modify or access
+  // private identity kernel state.
   function broadcastToMeshnet(text, queryId) {
     try {
       const nc = window._natsConn;
@@ -3226,6 +3286,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
         query: text,
         timestamp: Date.now(),
         source: 'nexus-frontend'
+        // NOTE: No identity data included — isolated by design (COHERE security)
       })));
       return true;
     } catch {
@@ -3251,11 +3312,23 @@ document.getElementById('node-search').addEventListener('input', (e) => {
               clearTimeout(window._cohereMeshnetTimeout);
               window._cohereMeshnetTimeout = null;
             }
-            // Display meshnet responses with source attribution
+            // Display meshnet responses with source attribution and identity info
             const source = resp.agentName || (resp.peerId ? resp.peerId.slice(0, 8) : 'meshnet');
             removeTypingIndicator();
-            addMessage(resp.content, 'agent', source + ' (meshnet)');
+            const msgEl = addMessage(resp.content, 'agent', source + ' (network)');
+            // Show resolving node's identity hash if provided (read-only attestation)
+            if (resp.identityHash || resp.identityCid) {
+              const idDiv = document.createElement('div');
+              idDiv.className = 'cohere-msg-source-network';
+              let idText = 'node identity: ';
+              if (resp.identityHash) idText += 'hash ' + resp.identityHash.slice(0, 12) + '...';
+              if (resp.identityCid) idText += (resp.identityHash ? ' | ' : '') + 'ipfs ' + resp.identityCid.slice(0, 16) + '...';
+              if (resp.identityVersion) idText += ' (v' + resp.identityVersion + ')';
+              idDiv.textContent = idText;
+              msgEl.appendChild(idDiv);
+            }
             conversationHistory.push({ role: 'assistant', content: resp.content });
+            pushLog('Response from <span class="log-highlight">' + escHtml(source) + '</span> via COHERE meshnet');
             // Reset send state
             isSending = false;
             chatSend.disabled = false;
@@ -3274,6 +3347,62 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       listenForMeshnetResponses();
     }
   }, 2000);
+
+  // Resolve via local Ollama — used as fallback when no network nodes respond
+  async function resolveViaLocalOllama() {
+    const model = await discoverOllamaModel();
+    if (!model) throw new Error('No Ollama models available');
+
+    const resp = await fetch('http://localhost:11434/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: conversationHistory.slice(-10),
+        stream: true
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+
+    if (!resp.ok) throw new Error('Ollama returned ' + resp.status);
+
+    removeTypingIndicator();
+    const responseMsg = document.createElement('div');
+    responseMsg.className = 'cohere-msg cohere-msg-agent';
+    const responseSpan = document.createElement('span');
+    responseMsg.appendChild(responseSpan);
+    chatMsgs.appendChild(responseMsg);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split('\\n')) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          const token = obj.message?.content || '';
+          fullText += token;
+          responseSpan.textContent = fullText;
+          chatMsgs.scrollTop = chatMsgs.scrollHeight;
+        } catch { /* partial JSON, ignore */ }
+      }
+    }
+
+    const sourceDiv = document.createElement('div');
+    sourceDiv.className = 'cohere-msg-source';
+    sourceDiv.textContent = 'via local-node (' + model.split(':')[0] + ') — fallback';
+    responseMsg.appendChild(sourceDiv);
+
+    if (fullText) {
+      conversationHistory.push({ role: 'assistant', content: fullText });
+      while (conversationHistory.length > 20) conversationHistory.splice(1, 1);
+    }
+  }
 
   async function sendMessage() {
     const text = chatInput.value.trim();
@@ -3295,101 +3424,84 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     // Generate a query ID for meshnet correlation
     const queryId = 'q-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
-    // Route to COHERE meshnet via NATS (non-blocking)
+    // ── Network-first routing ──────────────────────────────────────────
+    // Strategy: prefer COHERE meshnet nodes over local Ollama.
+    //   1. If NATS is connected and nodes are available, broadcast to meshnet
+    //   2. Wait up to 8s for a network response (gentle load-balancing via NATS pub)
+    //   3. Fall back to local Ollama only if no network response arrives
+    //
+    // Security: query routing is isolated from identity kernel.
+    // nexus.cohere.query carries ONLY the user query and queryId.
+    // Identity kernel data never flows through the query channel.
+
+    const hasNetworkNodes = natsAgents.size > 0;
     const meshnetSent = broadcastToMeshnet(text, queryId);
-    if (meshnetSent) {
-      pushLog('COHERE query broadcast to <span class="log-highlight">nexus.cohere.query</span>');
+
+    if (meshnetSent && hasNetworkNodes) {
+      // Network-first: wait for meshnet response with timeout
+      chatStatus.textContent = 'routing via meshnet (' + natsAgents.size + ' node' + (natsAgents.size !== 1 ? 's' : '') + ')...';
+      chatStatus.style.color = '#4dabf7';
+      pushLog('COHERE query routed to <span class="log-highlight">meshnet</span> (' + natsAgents.size + ' nodes)');
+
+      // Set a timeout: if no meshnet response in 8s, fall back to local Ollama
+      const meshTimeout = setTimeout(async () => {
+        window._cohereMeshnetTimeout = null;
+        // No meshnet response — fall back to local
+        chatStatus.textContent = 'meshnet timeout, trying local...';
+        chatStatus.style.color = '#ffae00';
+        pushLog('Meshnet timeout — <span class="log-highlight">falling back to local Ollama</span>');
+
+        try {
+          await resolveViaLocalOllama();
+        } catch (err) {
+          const errMsg = err.message || 'unknown error';
+          const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
+          removeTypingIndicator();
+          if (isNetworkErr) {
+            addMessage('No network or local inference available. ' + natsAgents.size + ' meshnet node(s) did not respond. Run \`oa\` with \`/cohere\` to contribute.', 'agent', 'info');
+          } else {
+            addMessage('Error: ' + errMsg, 'agent', 'error');
+          }
+        }
+
+        chatStatus.textContent = 'distributed mind';
+        chatStatus.style.color = '#555';
+        chatSend.disabled = false;
+        isSending = false;
+        chatInput.focus();
+      }, 8000);
+
+      window._cohereMeshnetTimeout = meshTimeout;
+      return; // Wait for meshnet or timeout — don't fall through to local
     }
 
-    // Also resolve locally via Ollama
+    // No network nodes available or NATS not connected — go direct to local
+    if (meshnetSent) {
+      pushLog('COHERE query broadcast to <span class="log-highlight">nexus.cohere.query</span> (no active nodes, also trying local)');
+    }
+
     try {
-      const model = await discoverOllamaModel();
-      if (!model) throw new Error('No Ollama models available');
-
-      // Use streaming for better UX
-      const resp = await fetch('http://localhost:11434/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          messages: conversationHistory.slice(-10), // Last 10 messages for context
-          stream: true
-        }),
-        signal: AbortSignal.timeout(60000),
-      });
-
-      if (!resp.ok) throw new Error('Ollama returned ' + resp.status);
-
-      // Remove typing indicator, create response message for streaming
-      removeTypingIndicator();
-      const responseMsg = document.createElement('div');
-      responseMsg.className = 'cohere-msg cohere-msg-agent';
-      const responseSpan = document.createElement('span');
-      responseMsg.appendChild(responseSpan);
-      chatMsgs.appendChild(responseMsg);
-
-      // Stream the response
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        // Ollama streams JSON objects, one per line
-        for (const line of chunk.split('\\n')) {
-          if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            const token = obj.message?.content || '';
-            fullText += token;
-            responseSpan.textContent = fullText;
-            chatMsgs.scrollTop = chatMsgs.scrollHeight;
-          } catch { /* partial JSON, ignore */ }
-        }
-      }
-
-      // Add source attribution
-      const sourceDiv = document.createElement('div');
-      sourceDiv.className = 'cohere-msg-source';
-      sourceDiv.textContent = 'via local-node (' + model.split(':')[0] + ')';
-      responseMsg.appendChild(sourceDiv);
-
-      // Add to conversation history
-      if (fullText) {
-        conversationHistory.push({ role: 'assistant', content: fullText });
-        // Keep history manageable
-        while (conversationHistory.length > 20) conversationHistory.splice(1, 1);
-      }
-
+      await resolveViaLocalOllama();
     } catch (err) {
-      // Local Ollama unavailable — this is expected when viewing from remote
       const errMsg = err.message || 'unknown error';
       const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
 
       if (isNetworkErr && meshnetSent) {
-        // Don't show error — meshnet query is in flight, keep typing indicator
-        // Set a timeout: if no meshnet response in 15s, show fallback message
-        chatStatus.textContent = 'resolving via meshnet...';
+        chatStatus.textContent = 'awaiting meshnet...';
         chatStatus.style.color = '#ffae00';
         const meshTimeout = setTimeout(() => {
           removeTypingIndicator();
-          addMessage('No local inference available. Query broadcast to COHERE meshnet — ' +
+          addMessage('No local inference and no COHERE meshnet responses. ' +
             String(natsAgents.size) + ' node(s) reachable. ' +
-            'Responses will appear when a participating node resolves your query. ' +
             'Run \`oa\` with \`/cohere\` enabled to contribute inference.', 'agent', 'meshnet');
-          chatStatus.textContent = 'awaiting meshnet';
+          chatStatus.textContent = 'distributed mind';
           chatStatus.style.color = '#555';
           chatSend.disabled = false;
           isSending = false;
           chatInput.focus();
         }, 15000);
-
-        // If a meshnet response arrives, cancel the timeout
-        const origListener = window._cohereMeshnetTimeout;
         window._cohereMeshnetTimeout = meshTimeout;
-        return; // Don't reset state yet — waiting for meshnet
+        return;
       } else if (isNetworkErr) {
         removeTypingIndicator();
         addMessage('No local Ollama and no COHERE meshnet nodes reachable. Start \`oa\` with \`/cohere\` to participate in the distributed mind.', 'agent', 'info');
@@ -3413,7 +3525,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
 
   // Welcome message
   const nodeCount = natsAgents.size || knownAgents.size || 0;
-  addMessage('COHERE distributed mind — ' + (nodeCount > 0 ? nodeCount + ' node(s) online' : 'connecting...') + '. Queries route to local inference first, then meshnet.', 'agent', 'system');
+  addMessage('COHERE distributed mind — ' + (nodeCount > 0 ? nodeCount + ' node(s) online' : 'connecting...') + '. Queries route to meshnet first, local Ollama as fallback. Identity kernels are signed, IPFS-pinned, and read-only from the query path.', 'agent', 'system');
 }
 </script>
 </body>

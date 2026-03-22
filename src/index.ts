@@ -1332,6 +1332,15 @@ export type {
   ContentFormat,
   BootstrapResponse,
   NetworkResponse,
+  // COHERE Part II types (Planes 2-4)
+  MemoryScope,
+  MemoryObjectType,
+  SharedMemoryObject,
+  MemoryDelta,
+  EpochCheckpoint,
+  CapacityAnnouncement,
+  SettlementReceipt,
+  FundingSource,
 } from './protocol/types.js';
 export {
   PROTOCOL_VERSION,

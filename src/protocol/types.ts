@@ -150,6 +150,102 @@ export interface HandshakeAck {
   clientVersion: string;
 }
 
+// ── COHERE Part II: Privacy Scoping (Plane 4, T2.4) ──
+// Per unified COHERE paper p.49: memory objects have visibility scope
+export type MemoryScope = 'public' | 'guild' | 'paid-cluster' | 'private';
+
+// ── COHERE Part II: Memory Object Model (Plane 4, T2.3) ──
+// Per unified COHERE paper p.49: shared memory/brain-state plane
+export type MemoryObjectType = 'episode' | 'summary' | 'procedure' | 'belief' | 'policy' | 'relationship' | 'checkpoint' | 'tombstone';
+
+export interface SharedMemoryObject {
+  id: string;
+  cid?: string;              // content-addressed reference
+  author_peer_id: string;
+  visibility: MemoryScope;
+  scope: MemoryScope;
+  timestamp: string;          // ISO-8601
+  parent_ids: string[];       // lineage DAG
+  confidence: number;         // 0-1
+  provenance_refs: string[];  // job:uuid, obs:id
+  quality_score: number;      // 0-1
+  cost_to_store: number;      // estimated storage cost
+  ttl: string;                // e.g., "90d"
+  supersedes: string[];       // IDs this object replaces
+  signature: string;          // Ed25519 signature
+}
+
+// ── COHERE Part II: Memory Delta (Plane 4, T2.3) ──
+// Per unified COHERE paper p.54: POST /v1/memory/delta
+export interface MemoryDelta {
+  delta_id: string;
+  scope: MemoryScope;
+  type: MemoryObjectType;
+  parents: string[];          // CID references
+  payload_ref: string;        // CID of new object
+  confidence: number;
+  provenance_refs: string[];
+  supersedes: string[];
+  ttl_days: number;
+  signature: string;
+}
+
+// ── COHERE Part II: Epoch Checkpoint (Plane 4, T2.3) ──
+// Per unified COHERE paper p.55: POST /v1/memory/checkpoint
+export interface EpochCheckpoint {
+  epoch: number;
+  root_cid: string;
+  accepted_deltas: string[];
+  pruned_deltas: string[];
+  policy_version: string;
+  witnesses: string[];        // peer IDs that signed
+  signature: string;
+}
+
+// ── COHERE Part II: Capability Advertisement (Plane 2, T1.1) ──
+// Per unified COHERE paper p.52: POST /v1/capacity/announce
+export interface CapacityAnnouncement {
+  peer_id: string;
+  region: string;
+  models: Array<{
+    name: string;
+    context: number;
+    modalities: string[];
+    warm: boolean;
+    max_concurrency: number;
+    price_in: number;          // per 1K input tokens
+    price_out: number;         // per 1K output tokens
+  }>;
+  supports: {
+    chat: boolean;
+    embed: boolean;
+    tools: boolean;
+    stream: boolean;
+  };
+  free_pool_opt_in: boolean;
+  signature: string;
+}
+
+// ── COHERE Part II: Settlement Receipt (Plane 3, T1.4) ──
+// Per unified COHERE paper p.54: POST /v1/settlement/receipt
+export interface SettlementReceipt {
+  job_id: string;
+  provider_peer_id: string;
+  usage_final: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+  latency_ms: number;
+  quality_flags: string[];
+  provider_reward: number;
+  commons_contribution: number;
+  signature: string;
+}
+
+// ── COHERE Part II: Funding Source (Plane 3, T2.2) ──
+// Per unified COHERE paper p.53: POST /v1/job/assign
+export type FundingSource = 'paid' | 'sponsor' | 'provider-credit' | 'mixed';
+
 // Capability invocation
 export interface InvocationRequest {
   requestId: string;

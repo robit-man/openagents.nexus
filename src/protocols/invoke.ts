@@ -84,6 +84,68 @@ export interface InvokeCancel {
   reason: string;
 }
 
+// ── COHERE Part II: Quote Protocol (Plane 3, T2.1) ──
+// Per unified COHERE paper p.52-53: POST /v1/job/quote + /v1/job/quote-response
+
+export interface InvokeQuote {
+  type: 'invoke.quote';
+  version: 1;
+  requestId: string;
+  /** Requested model family (e.g., "qwen3", "nemotron") */
+  model_family: string;
+  /** Privacy class: standard (any provider), sensitive (trusted only), local-only */
+  privacy_class: 'standard' | 'sensitive' | 'local-only';
+  /** Estimated input tokens */
+  input_tokens_est: number;
+  /** Estimated output tokens */
+  output_tokens_est: number;
+  /** Maximum acceptable latency in ms */
+  max_latency_ms: number;
+  /** Whether request is eligible for free/sponsor tier */
+  free_eligible: boolean;
+}
+
+export interface InvokeQuoteResponse {
+  type: 'invoke.quote_response';
+  version: 1;
+  requestId: string;
+  /** Provider's peer ID */
+  peer_id: string;
+  /** Whether provider accepts this job */
+  accepted: boolean;
+  /** Estimated cost in USDC (string, wei precision) */
+  estimated_cost: number;
+  /** Estimated latency in ms */
+  estimated_latency_ms: number;
+  /** Whether model weights are already loaded (warm) */
+  warm: boolean;
+  /** Provider's trust score (0-1) */
+  trust_score: number;
+  /** Whether this can be fulfilled from sponsor pool */
+  sponsor_eligible: boolean;
+  signature: string;
+}
+
+// ── COHERE Part II: Job Assignment (Plane 3, T2.2) ──
+// Per unified COHERE paper p.53: POST /v1/job/assign
+
+export interface InvokeAssign {
+  type: 'invoke.assign';
+  version: 1;
+  requestId: string;
+  /** Selected provider */
+  winning_peer_id: string;
+  /** How this job is funded */
+  funding_source: 'paid' | 'sponsor' | 'provider-credit' | 'mixed';
+  /** Maximum billable tokens */
+  max_billable_tokens: number;
+  /** Escrow reference (for paid jobs) */
+  escrow_ref?: string;
+  /** Context reference (CID) */
+  context_ref?: string;
+  signature: string;
+}
+
 export interface InvokePaymentRequired {
   type: 'invoke.payment_required';
   version: 1;
@@ -122,7 +184,10 @@ export type InvokeMessage =
   | InvokeError
   | InvokeCancel
   | InvokePaymentRequired
-  | InvokePaymentProof;
+  | InvokePaymentProof
+  | InvokeQuote
+  | InvokeQuoteResponse
+  | InvokeAssign;
 
 // ---------------------------------------------------------------------------
 // Codec helpers

@@ -592,6 +592,8 @@
   </div>
 </aside>
 
+<div id="cohere-backdrop"></div>
+
 <!-- COHERE MESHNET CHAT WIDGET -->
 <div id="cohere-chat" class="cohere-chat-collapsed">
   <div id="cohere-chat-header" class="cohere-chat-header">
@@ -730,6 +732,55 @@
   }
   .cohere-chat-input-row button:hover {
     background: rgba(255,174,0,0.5);
+  }
+  .cohere-chat-input-row button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .cohere-typing {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 10px 10px 10px 2px;
+  }
+  .cohere-typing-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: #ffae00;
+    animation: cohere-bounce 1.2s infinite ease-in-out;
+  }
+  .cohere-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .cohere-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes cohere-bounce {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1.2); }
+  }
+  #cohere-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+    background: rgba(0,0,0,0.3);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+  #cohere-backdrop.active { display: block; }
+  .cohere-ik-status {
+    display: inline-block;
+    font-size: 7px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+  }
+  .cohere-ik-active {
+    background: rgba(255,174,0,0.2);
+    color: #ffae00;
+  }
+  .cohere-ik-inactive {
+    background: rgba(255,255,255,0.05);
+    color: #666;
   }
 </style>
 
@@ -2336,6 +2387,22 @@ function renderAgentCards(agents) {
       (tps ? `<div class="tree-row"><span class="tree-key">speed</span><span class="tree-val">${escHtml(tps)}</span></div>` : '') +
       (price ? `<div class="tree-row"><span class="tree-key">price</span><span class="tree-val" style="color:#ffae00">${escHtml(typeof price === 'object' ? (price.description || JSON.stringify(price)) : String(price))}</span></div>` : '');
 
+    // Identity kernel status for COHERE-participating nodes
+    if (isCohere) {
+      const ik = agent.identityKernel || agent.ik || {};
+      const ikActive = ik.active !== false; // default to active if field present on cohere node
+      const ikPhase = ik.phase || (ikActive ? 'converged' : 'initializing');
+      const ikScore = typeof ik.coherence === 'number' ? (ik.coherence * 100).toFixed(0) + '%' : (ikActive ? 'nominal' : '--');
+      const ikSection = document.createElement('div');
+      ikSection.style.cssText = 'margin-top:3px;padding-top:3px;border-top:1px solid rgba(255,174,0,0.1)';
+      ikSection.innerHTML =
+        `<div class="tree-row"><span class="tree-key" style="color:#ffae00">identity kernel</span><span class="cohere-ik-status ${ikActive ? 'cohere-ik-active' : 'cohere-ik-inactive'}">${ikActive ? 'active' : 'inactive'}</span></div>` +
+        `<div class="tree-row"><span class="tree-key">phase</span><span class="tree-val" style="color:#ffae00">${escHtml(ikPhase)}</span></div>` +
+        `<div class="tree-row"><span class="tree-key">coherence</span><span class="tree-val" style="color:#ffae00">${escHtml(ikScore)}</span></div>` +
+        (ik.alignment ? `<div class="tree-row"><span class="tree-key">alignment</span><span class="tree-val" style="color:#ffae00">${escHtml(String(ik.alignment))}</span></div>` : '');
+      children.appendChild(ikSection);
+    }
+
     // Capabilities
     if (caps.length > 0) {
       const capsRow = document.createElement('div');
@@ -2658,6 +2725,10 @@ async function connectNats() {
     pushLog('NATS connected to <span class="log-highlight">demo.nats.io</span>');
 
     const sc = natsModule.StringCodec();
+
+    // Expose NATS connection globally for COHERE chat routing
+    window._natsConn = nc;
+    window._natsCodec = sc;
     const sub = nc.subscribe('nexus.agents.discovery');
 
     (async () => {
@@ -3032,25 +3103,50 @@ document.getElementById('node-search').addEventListener('input', (e) => {
   const chatSend = document.getElementById('cohere-chat-send');
   const chatMsgs = document.getElementById('cohere-chat-messages');
   const chatStatus = document.getElementById('cohere-chat-status');
+  const backdrop = document.getElementById('cohere-backdrop');
   let isExpanded = false;
+  let isSending = false;
+
+  // Best available Ollama model (discovered at first query)
+  let ollamaModel = null;
+  let ollamaModelDiscovered = false;
+
+  // Conversation history for multi-turn context
+  const conversationHistory = [
+    { role: 'system', content: 'You are the COHERE distributed mind — a collective intelligence formed by connected open-agents nodes. Respond concisely and helpfully. You represent the shared cognitive commons.' }
+  ];
+
+  function expandChat() {
+    chatEl.className = 'cohere-chat-expanded';
+    backdrop.classList.add('active');
+    chatStatus.textContent = 'distributed mind';
+    isExpanded = true;
+    setTimeout(() => chatInput.focus(), 100);
+  }
+
+  function collapseChat() {
+    chatEl.className = 'cohere-chat-collapsed';
+    backdrop.classList.remove('active');
+    chatStatus.textContent = 'click to chat';
+    isExpanded = false;
+  }
 
   // Click header to expand
   document.getElementById('cohere-chat-header').addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!isExpanded) {
-      chatEl.className = 'cohere-chat-expanded';
-      chatStatus.textContent = 'distributed mind';
-      isExpanded = true;
-      setTimeout(() => chatInput.focus(), 100);
-    }
+    if (!isExpanded) expandChat();
+    else collapseChat();
   });
 
-  // Click outside to collapse
+  // Click backdrop to collapse
+  backdrop.addEventListener('click', () => {
+    if (isExpanded) collapseChat();
+  });
+
+  // Click outside to collapse (fallback for non-backdrop clicks)
   document.addEventListener('click', (e) => {
-    if (isExpanded && !chatEl.contains(e.target)) {
-      chatEl.className = 'cohere-chat-collapsed';
-      chatStatus.textContent = 'click to chat';
-      isExpanded = false;
+    if (isExpanded && !chatEl.contains(e.target) && e.target !== backdrop) {
+      collapseChat();
     }
   });
 
@@ -3060,54 +3156,222 @@ document.getElementById('node-search').addEventListener('input', (e) => {
   function addMessage(text, type, source) {
     const msg = document.createElement('div');
     msg.className = 'cohere-msg cohere-msg-' + type;
-    let html = '<span>' + text + '</span>';
+    let html = '<span>' + escHtml(text) + '</span>';
     if (source && type === 'agent') {
-      html += '<div class="cohere-msg-source">via ' + source + '</div>';
+      html += '<div class="cohere-msg-source">via ' + escHtml(source) + '</div>';
     }
     msg.innerHTML = html;
     chatMsgs.appendChild(msg);
     chatMsgs.scrollTop = chatMsgs.scrollHeight;
+    return msg;
   }
+
+  function addTypingIndicator() {
+    const msg = document.createElement('div');
+    msg.className = 'cohere-msg cohere-msg-agent';
+    msg.id = 'cohere-typing-indicator';
+    msg.innerHTML = '<div class="cohere-typing"><div class="cohere-typing-dot"></div><div class="cohere-typing-dot"></div><div class="cohere-typing-dot"></div></div>';
+    chatMsgs.appendChild(msg);
+    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+    return msg;
+  }
+
+  function removeTypingIndicator() {
+    const el = document.getElementById('cohere-typing-indicator');
+    if (el) el.remove();
+  }
+
+  // Discover best available Ollama model (prefer largest, most capable)
+  async function discoverOllamaModel() {
+    if (ollamaModelDiscovered) return ollamaModel;
+    try {
+      const resp = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(5000) });
+      const data = await resp.json();
+      const models = data.models || [];
+      if (models.length === 0) return null;
+
+      // Score models: prefer larger param count, prefer instruct/chat variants
+      const scored = models.map(m => {
+        const name = m.name || '';
+        const size = m.size || 0;
+        let score = size; // base score is raw file size
+        // Boost chat/instruct models
+        if (/instruct|chat/i.test(name)) score *= 1.2;
+        // Boost well-known capable models
+        if (/qwen|llama|mistral|gemma|phi|deepseek/i.test(name)) score *= 1.1;
+        // Slight penalty for very small models (embedding, etc.)
+        if (/embed|all-minilm|nomic/i.test(name)) score *= 0.01;
+        return { name, score };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      ollamaModel = scored[0].name;
+      ollamaModelDiscovered = true;
+      return ollamaModel;
+    } catch {
+      ollamaModelDiscovered = true;
+      return null;
+    }
+  }
+
+  // Broadcast query to COHERE meshnet via NATS
+  function broadcastToMeshnet(text, queryId) {
+    try {
+      const nc = window._natsConn;
+      const sc = window._natsCodec;
+      if (!nc || !sc) return false;
+
+      nc.publish('nexus.cohere.query', sc.encode(JSON.stringify({
+        type: 'cohere.query',
+        queryId,
+        query: text,
+        timestamp: Date.now(),
+        source: 'nexus-frontend'
+      })));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Listen for COHERE meshnet responses via NATS
+  function listenForMeshnetResponses() {
+    try {
+      const nc = window._natsConn;
+      const sc = window._natsCodec;
+      if (!nc || !sc) return;
+
+      const sub = nc.subscribe('nexus.cohere.response');
+      (async () => {
+        for await (const msg of sub) {
+          try {
+            const resp = JSON.parse(sc.decode(msg.data));
+            if (!resp.queryId || !resp.content) continue;
+            // Display meshnet responses with source attribution
+            const source = resp.agentName || (resp.peerId ? resp.peerId.slice(0, 8) : 'meshnet');
+            removeTypingIndicator();
+            addMessage(resp.content, 'agent', source + ' (meshnet)');
+          } catch { /* ignore malformed */ }
+        }
+      })().catch(() => {});
+    } catch { /* NATS not available */ }
+  }
+
+  // Start listening for meshnet responses once NATS is ready
+  const meshnetPollId = setInterval(() => {
+    if (window._natsConn) {
+      clearInterval(meshnetPollId);
+      listenForMeshnetResponses();
+    }
+  }, 2000);
 
   async function sendMessage() {
     const text = chatInput.value.trim();
-    if (!text) return;
+    if (!text || isSending) return;
+
+    isSending = true;
     chatInput.value = '';
+    chatSend.disabled = true;
     addMessage(text, 'user');
 
-    // Show thinking indicator
+    // Show typing indicator
     chatStatus.textContent = 'thinking...';
     chatStatus.style.color = '#ffae00';
+    addTypingIndicator();
 
-    // Route to COHERE meshnet — try NATS broadcast first, fallback to local
+    // Add to conversation history
+    conversationHistory.push({ role: 'user', content: text });
+
+    // Generate a query ID for meshnet correlation
+    const queryId = 'q-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+
+    // Route to COHERE meshnet via NATS (non-blocking)
+    const meshnetSent = broadcastToMeshnet(text, queryId);
+    if (meshnetSent) {
+      pushLog('COHERE query broadcast to <span class="log-highlight">nexus.cohere.query</span>');
+    }
+
+    // Also resolve locally via Ollama
     try {
-      // For now: local Ollama fallback (meshnet routing comes with full COHERE integration)
+      const model = await discoverOllamaModel();
+      if (!model) throw new Error('No Ollama models available');
+
+      // Use streaming for better UX
       const resp = await fetch('http://localhost:11434/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen3.5:9b',
-          messages: [
-            { role: 'system', content: 'You are the COHERE distributed mind — a collective intelligence formed by connected open-agents nodes. Respond concisely and helpfully. You represent the shared cognitive commons.' },
-            { role: 'user', content: text }
-          ],
-          stream: false
+          model,
+          messages: conversationHistory.slice(-10), // Last 10 messages for context
+          stream: true
         }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(60000),
       });
-      const data = await resp.json();
-      const reply = data.message?.content || 'No response from meshnet.';
-      addMessage(reply, 'agent', 'local-node');
+
+      if (!resp.ok) throw new Error('Ollama returned ' + resp.status);
+
+      // Remove typing indicator, create response message for streaming
+      removeTypingIndicator();
+      const responseMsg = document.createElement('div');
+      responseMsg.className = 'cohere-msg cohere-msg-agent';
+      const responseSpan = document.createElement('span');
+      responseMsg.appendChild(responseSpan);
+      chatMsgs.appendChild(responseMsg);
+
+      // Stream the response
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        // Ollama streams JSON objects, one per line
+        for (const line of chunk.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            const token = obj.message?.content || '';
+            fullText += token;
+            responseSpan.textContent = fullText;
+            chatMsgs.scrollTop = chatMsgs.scrollHeight;
+          } catch { /* partial JSON, ignore */ }
+        }
+      }
+
+      // Add source attribution
+      const sourceDiv = document.createElement('div');
+      sourceDiv.className = 'cohere-msg-source';
+      sourceDiv.textContent = 'via local-node (' + model.split(':')[0] + ')';
+      responseMsg.appendChild(sourceDiv);
+
+      // Add to conversation history
+      if (fullText) {
+        conversationHistory.push({ role: 'assistant', content: fullText });
+        // Keep history manageable
+        while (conversationHistory.length > 20) conversationHistory.splice(1, 1);
+      }
+
     } catch (err) {
-      addMessage('Meshnet offline — no COHERE nodes reachable. Start oa with /cohere to participate.', 'agent', 'error');
+      removeTypingIndicator();
+      const errMsg = err.message || 'unknown error';
+      if (errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
+        addMessage('Local inference unavailable. ' + (meshnetSent ? 'Query sent to meshnet — waiting for distributed response.' : 'No COHERE nodes reachable. Start oa with /cohere to participate.'), 'agent', 'error');
+      } else {
+        addMessage('Error: ' + errMsg, 'agent', 'error');
+      }
     }
+
     chatStatus.textContent = 'distributed mind';
     chatStatus.style.color = '#555';
+    chatSend.disabled = false;
+    isSending = false;
+    chatInput.focus();
   }
 
   chatSend.addEventListener('click', sendMessage);
   chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendMessage();
+    if (e.key === 'Enter' && !e.shiftKey) sendMessage();
   });
 
   // Welcome message

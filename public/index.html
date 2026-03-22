@@ -506,6 +506,147 @@
   </div>
 </aside>
 
+<!-- COHERE MESHNET CHAT WIDGET -->
+<div id="cohere-chat" class="cohere-chat-collapsed">
+  <div id="cohere-chat-header" class="cohere-chat-header">
+    <span style="color:#ffae00;font-weight:bold">⬡</span>
+    <span style="font-size:10px;color:#aaa;margin-left:6px">COHERE Meshnet</span>
+    <span id="cohere-chat-status" style="font-size:8px;color:#555;margin-left:auto">click to chat</span>
+  </div>
+  <div id="cohere-chat-body" class="cohere-chat-body">
+    <div id="cohere-chat-messages" class="cohere-chat-messages"></div>
+    <div class="cohere-chat-input-row">
+      <input type="text" id="cohere-chat-input" placeholder="Ask the distributed mind..." autocomplete="off">
+      <button id="cohere-chat-send">→</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .cohere-chat-collapsed {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 360px;
+    z-index: 200;
+    border: 1px solid rgba(255,174,0,0.3);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98));
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    cursor: pointer;
+  }
+  .cohere-chat-expanded {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(500px, 90vw);
+    height: min(50vh, 400px);
+    z-index: 200;
+    border: 1px solid rgba(255,174,0,0.4);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98));
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    display: flex;
+    flex-direction: column;
+  }
+  .cohere-chat-header {
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid rgba(255,174,0,0.15);
+    flex-shrink: 0;
+  }
+  .cohere-chat-collapsed .cohere-chat-body { display: none; }
+  .cohere-chat-expanded .cohere-chat-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+  .cohere-chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,174,0,0.3) transparent;
+  }
+  .cohere-chat-messages::-webkit-scrollbar { width: 4px; }
+  .cohere-chat-messages::-webkit-scrollbar-thumb { background: rgba(255,174,0,0.3); border-radius: 2px; }
+  .cohere-msg {
+    margin-bottom: 10px;
+    line-height: 1.5;
+    font-size: 11px;
+  }
+  .cohere-msg-user {
+    color: #fff;
+    text-align: right;
+  }
+  .cohere-msg-user span {
+    background: rgba(255,174,0,0.2);
+    padding: 6px 10px;
+    border-radius: 10px 10px 2px 10px;
+    display: inline-block;
+    max-width: 80%;
+  }
+  .cohere-msg-agent {
+    color: #ccc;
+  }
+  .cohere-msg-agent span {
+    background: rgba(255,255,255,0.06);
+    padding: 6px 10px;
+    border-radius: 10px 10px 10px 2px;
+    display: inline-block;
+    max-width: 80%;
+  }
+  .cohere-msg-agent .cohere-msg-source {
+    font-size: 8px;
+    color: #666;
+    margin-top: 2px;
+  }
+  .cohere-chat-input-row {
+    display: flex;
+    padding: 8px 10px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    flex-shrink: 0;
+  }
+  .cohere-chat-input-row input {
+    flex: 1;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #fff;
+    font-family: var(--font);
+    font-size: 11px;
+    outline: none;
+  }
+  .cohere-chat-input-row input:focus {
+    border-color: rgba(255,174,0,0.4);
+  }
+  .cohere-chat-input-row button {
+    background: rgba(255,174,0,0.3);
+    border: none;
+    border-radius: 8px;
+    color: #ffae00;
+    font-size: 14px;
+    padding: 0 14px;
+    margin-left: 6px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  .cohere-chat-input-row button:hover {
+    background: rgba(255,174,0,0.5);
+  }
+</style>
+
 <!-- RIGHT SIDEBAR -->
 <aside id="sidebar-right" aria-label="Network activity log">
   <div class="sidebar-header">activity</div>
@@ -2762,6 +2903,98 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     pushLog(`Storage: <span class="log-highlight">${caps.storageUsedGB}/${caps.storageQuotaGB}GB</span>`);
   }
 })();
+
+// ─────────────────────────────────────────────
+//  COHERE MESHNET CHAT WIDGET
+// ─────────────────────────────────────────────
+{
+  const chatEl = document.getElementById('cohere-chat');
+  const chatBody = document.getElementById('cohere-chat-body');
+  const chatInput = document.getElementById('cohere-chat-input');
+  const chatSend = document.getElementById('cohere-chat-send');
+  const chatMsgs = document.getElementById('cohere-chat-messages');
+  const chatStatus = document.getElementById('cohere-chat-status');
+  let isExpanded = false;
+
+  // Click header to expand
+  document.getElementById('cohere-chat-header').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!isExpanded) {
+      chatEl.className = 'cohere-chat-expanded';
+      chatStatus.textContent = 'distributed mind';
+      isExpanded = true;
+      setTimeout(() => chatInput.focus(), 100);
+    }
+  });
+
+  // Click outside to collapse
+  document.addEventListener('click', (e) => {
+    if (isExpanded && !chatEl.contains(e.target)) {
+      chatEl.className = 'cohere-chat-collapsed';
+      chatStatus.textContent = 'click to chat';
+      isExpanded = false;
+    }
+  });
+
+  // Prevent clicks inside chat from collapsing
+  chatEl.addEventListener('click', (e) => e.stopPropagation());
+
+  function addMessage(text, type, source) {
+    const msg = document.createElement('div');
+    msg.className = 'cohere-msg cohere-msg-' + type;
+    let html = '<span>' + text + '</span>';
+    if (source && type === 'agent') {
+      html += '<div class="cohere-msg-source">via ' + source + '</div>';
+    }
+    msg.innerHTML = html;
+    chatMsgs.appendChild(msg);
+    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  }
+
+  async function sendMessage() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = '';
+    addMessage(text, 'user');
+
+    // Show thinking indicator
+    chatStatus.textContent = 'thinking...';
+    chatStatus.style.color = '#ffae00';
+
+    // Route to COHERE meshnet — try NATS broadcast first, fallback to local
+    try {
+      // For now: local Ollama fallback (meshnet routing comes with full COHERE integration)
+      const resp = await fetch('http://localhost:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'qwen3.5:9b',
+          messages: [
+            { role: 'system', content: 'You are the COHERE distributed mind — a collective intelligence formed by connected open-agents nodes. Respond concisely and helpfully. You represent the shared cognitive commons.' },
+            { role: 'user', content: text }
+          ],
+          stream: false
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const data = await resp.json();
+      const reply = data.message?.content || 'No response from meshnet.';
+      addMessage(reply, 'agent', 'local-node');
+    } catch (err) {
+      addMessage('Meshnet offline — no COHERE nodes reachable. Start oa with /cohere to participate.', 'agent', 'error');
+    }
+    chatStatus.textContent = 'distributed mind';
+    chatStatus.style.color = '#555';
+  }
+
+  chatSend.addEventListener('click', sendMessage);
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  // Welcome message
+  addMessage('COHERE meshnet ready. Connected nodes share inference through the distributed cognitive commons. Ask anything.', 'agent', 'system');
+}
 </script>
 </body>
 </html>

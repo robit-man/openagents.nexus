@@ -1341,6 +1341,8 @@ export type {
   CapacityAnnouncement,
   SettlementReceipt,
   FundingSource,
+  QueueClass,
+  TypedArtifact,
 } from './protocol/types.js';
 export {
   PROTOCOL_VERSION,

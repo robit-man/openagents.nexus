@@ -246,6 +246,41 @@ export interface SettlementReceipt {
 // Per unified COHERE paper p.53: POST /v1/job/assign
 export type FundingSource = 'paid' | 'sponsor' | 'provider-credit' | 'mixed';
 
+// ── COHERE Part II: Queue Classes (Plane 3, p.48) ──
+// Each class has its own latency and payment policy
+export type QueueClass = 'local-only' | 'trusted-neighborhood' | 'open-market' | 'sponsor-batch';
+
+// ── COHERE Part II: Typed Artifacts (Layer 4, p.9) ──
+// "Every important intermediate product should become an artifact"
+export interface TypedArtifact {
+  /** Unique artifact ID */
+  id: string;
+  /** Schema identifier (e.g., 'cohere:artifact:v1') */
+  schema: string;
+  /** Typed content category */
+  type: 'plan' | 'analysis' | 'code' | 'draft' | 'evidence' | 'counterexample' | 'summary' | 'decision';
+  /** Content hash (SHA-256) for integrity verification */
+  contentHash: string;
+  /** The actual content */
+  content: string;
+  /** Parent artifact IDs (lineage DAG) */
+  parentIds: string[];
+  /** Confidence level (0-1) */
+  confidence: number;
+  /** Supporting citations or references */
+  citations: string[];
+  /** Open questions or uncertainties */
+  openQuestions: string[];
+  /** Which roles should consume this artifact */
+  intendedConsumers: ('planner' | 'executor' | 'reflector' | 'drafter' | 'evaluator')[];
+  /** Author peer ID */
+  authorPeerId: string;
+  /** Creation timestamp */
+  createdAt: string;
+  /** Ed25519 signature */
+  signature: string;
+};
+
 // Capability invocation
 export interface InvocationRequest {
   requestId: string;

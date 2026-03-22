@@ -389,6 +389,46 @@ The nexus daemon script in `nexus.ts` should be updated to:
 - Use `invokeCapability()` for inference requests instead of room messages
 - Set `keyStorePath` for persistent identity across restarts
 
+## COHERE Cognitive Commons
+
+This package implements the distributed systems layer of the [Project COHERE](https://github.com/robit-man/open-agents) layered cognitive architecture — a provenance-grounded design for persistent, self-directed cognitive systems.
+
+### Five-Plane Architecture
+
+| Plane | Name | Implementation |
+|---|---|---|
+| 1 | Local Intelligence | `open-agents-ai` npm package (Ollama, RLM, COHERE L2-L8) |
+| 2 | P2P Transport | libp2p mesh, DHT, GossipSub, rooms, DMs |
+| 3 | Inference Market | x402 payment, quote protocol, settlement receipts |
+| 4 | Shared Memory | Memory deltas, epoch checkpoints, privacy scoping |
+| 5 | Human Orchestration | Provider/curator/sponsor/witness roles |
+
+### COHERE Types (v1.6.0+)
+
+```typescript
+import {
+  // Plane 3: Market
+  SponsorPoolManager, computePayoutBreakdown, DualBalanceManager,
+  type InvokeQuote, type InvokeQuoteResponse, type InvokeAssign,
+  type SettlementReceipt, type CapacityAnnouncement,
+  // Plane 4: Shared Memory
+  type MemoryDelta, type EpochCheckpoint, type SharedMemoryObject,
+  type MemoryScope, // 'public' | 'guild' | 'paid-cluster' | 'private'
+  // Plane 5: Orchestration
+  type HumanRole, type ProviderPolicy, type DisputeCase,
+} from 'open-agents-nexus';
+```
+
+### Research Provenance
+
+| Component | Paper |
+|---|---|
+| RLM Context OS | [Recursive Language Models](https://arxiv.org/abs/2512.24601) |
+| SPRINT Reasoning | [SPRINT](https://arxiv.org/abs/2506.05745) |
+| Memory Metabolism | [TIMG](https://arxiv.org/abs/2603.10600), [MemMA](https://arxiv.org/abs/2603.18718) |
+| Reflection/Integrity | [LEAFE](https://arxiv.org/abs/2603.16843), [RewardHacking](https://arxiv.org/abs/2603.11337) |
+| Exploration/Culture | [SGE](https://arxiv.org/abs/2603.02045), [DGM](https://arxiv.org/abs/2505.22954) |
+
 ## Security
 
 Read [SECURITY.md](./SECURITY.md) before deploying. Key rules:

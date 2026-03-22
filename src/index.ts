@@ -1417,6 +1417,9 @@ export type {
   InvokeCancel,
   InvokePaymentRequired,
   InvokePaymentProof,
+  InvokeQuote,
+  InvokeQuoteResponse,
+  InvokeAssign,
   InvokeMessage,
   InvokeHandler,
   InvokeStreamHandle,
@@ -1426,6 +1429,46 @@ export type {
   SyncRequest,
   SyncResponse,
 } from './protocols/index.js';
+
+// COHERE Part II Tier 3: Sponsor Pools (Plane 3)
+export { SponsorPoolManager, COHERE_REVENUE_SPLIT } from './sponsor/index.js';
+export type {
+  SponsorPool,
+  FreeUserEnvelope,
+  ContributionCredit,
+  SponsoredRequestClass,
+} from './sponsor/index.js';
+export type { FundingSource as SponsorFundingSource } from './sponsor/index.js';
+
+// COHERE Part II Tier 3: Human Orchestration (Plane 5)
+export type {
+  HumanRole,
+  NetworkParticipant,
+  ProviderPolicy,
+  CurationPolicy,
+  MemoryProposal,
+  SponsorPolicy,
+  DisputeCase,
+  DisputeStatus,
+  DisputeVerdict,
+  HomeNodeIdentity,
+} from './sponsor/orchestration.js';
+
+// COHERE Part II Tier 3: Provider Payout Equation (Plane 3)
+export { computePayoutBreakdown, DEFAULT_PAYOUT_CONFIG } from './metering/payout.js';
+export type {
+  PayoutInput,
+  PayoutBreakdown,
+  PayoutConfig,
+} from './metering/payout.js';
+
+// COHERE Part II Tier 3: Two-Balance Model (Plane 3)
+export { DualBalanceManager } from './x402/balance.js';
+export type {
+  DualBalance,
+  BalanceTransaction,
+  BalanceTransactionType,
+} from './x402/balance.js';
 
 // Bootstrap Phase 4: federated multi-source bootstrap
 export {

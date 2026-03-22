@@ -157,11 +157,11 @@
     flex-shrink: 0;
   }
 
-  /* ── PEER CARDS ── */
+  /* ── AGENT TREE (VS Code file-explorer style) ── */
   #nodes-list {
     flex: 1;
     overflow-y: auto;
-    padding: 8px;
+    padding: 2px 0;
     scrollbar-width: thin;
     scrollbar-color: var(--grey-muted) transparent;
   }
@@ -170,52 +170,138 @@
 
   /* Fade-out gradient mask at bottom of agent list */
   #nodes-list {
-    -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
   }
 
-  .peer-card {
+  /* Tree node — each agent is a <details> element */
+  .tree-node {
     border: none;
-    padding: 6px 10px;
-    margin-bottom: 2px;
-    background: transparent;
-    transition: background 0.2s, max-height 0.3s ease;
+    margin: 0;
+    padding: 0;
+  }
+  .tree-node > summary {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px 3px 8px;
     cursor: pointer;
-    border-radius: 4px;
-    max-height: 60px;
-    overflow: hidden;
+    font-size: 10px;
+    color: #ccc;
+    list-style: none;
+    user-select: none;
+    border-radius: 0;
+    transition: background 0.15s;
   }
-  .peer-card.expanded {
-    max-height: 400px;
-    background: rgba(255,255,255,0.06);
+  .tree-node > summary::-webkit-details-marker { display: none; }
+  .tree-node > summary::marker { content: ''; }
+  .tree-node > summary:hover { background: rgba(255,255,255,0.06); }
+  .tree-node[open] > summary { background: rgba(255,255,255,0.04); }
+
+  /* Chevron */
+  .tree-chevron {
+    display: inline-block;
+    width: 10px;
+    font-size: 8px;
+    color: #666;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+    text-align: center;
   }
-  .peer-card:hover {
-    background: rgba(255,255,255,0.04);
-  }
-  .peer-card .peer-details {
-    display: none;
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid rgba(255,255,255,0.08);
-    font-size: 9px;
-    color: #888;
-    line-height: 1.6;
-  }
-  .peer-card.expanded .peer-details {
-    display: block;
-  }
-  .peer-card .peer-status {
+  .tree-node[open] > summary .tree-chevron { transform: rotate(90deg); }
+
+  /* Status dot */
+  .tree-dot {
     display: inline-block;
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    margin-right: 4px;
-    vertical-align: middle;
+    flex-shrink: 0;
   }
-  .peer-card .peer-status.online { background: #0f0; }
-  .peer-card .peer-status.idle { background: #ff0; }
-  .peer-card .peer-status.stale { background: #666; }
-  .peer-card .peer-status.cohere { background: #ffae00; }
+  .tree-dot.online { background: #0f0; }
+  .tree-dot.idle { background: #ff0; }
+  .tree-dot.stale { background: #666; }
+  .tree-dot.cohere { background: #ffae00; box-shadow: 0 0 4px rgba(255,174,0,0.5); }
+
+  /* Agent name */
+  .tree-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Price badge */
+  .tree-price {
+    font-size: 7px;
+    color: #ffae00;
+    background: rgba(255,174,0,0.12);
+    padding: 1px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  /* Expanded content (children of tree node) */
+  .tree-children {
+    padding: 0 0 4px 22px;
+    font-size: 8px;
+    color: #777;
+    line-height: 1.7;
+    border-left: 1px solid rgba(255,255,255,0.06);
+    margin-left: 12px;
+  }
+  .tree-children .tree-row {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    padding: 1px 4px;
+  }
+  .tree-children .tree-row:hover {
+    background: rgba(255,255,255,0.03);
+  }
+  .tree-children .tree-key {
+    color: #555;
+    font-size: 7px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+    min-width: 32px;
+  }
+  .tree-children .tree-val {
+    color: #999;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tree-children .tree-cap {
+    display: inline-block;
+    background: rgba(255,255,255,0.06);
+    color: #aaa;
+    padding: 1px 4px;
+    border-radius: 2px;
+    margin: 1px 2px 1px 0;
+    font-size: 7px;
+  }
+  .tree-children .tree-msg {
+    color: #666;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+
+  /* Legacy peer-card compat (for kv/nats/bootstrap dropdown sections) */
+  .peer-card {
+    border: none;
+    padding: 3px 6px 3px 22px;
+    margin: 0;
+    background: transparent;
+    cursor: default;
+    font-size: 9px;
+    color: #888;
+  }
+  .peer-card:hover { background: rgba(255,255,255,0.03); }
 
   .peer-name {
     display: flex;
@@ -2176,74 +2262,132 @@ function renderPeerCards(bootstrapPeers) {
   nodesList.appendChild(details);
 }
 
+/** VS Code file-explorer-style agent tree */
 function renderAgentCards(agents) {
-  // Remove existing agent cards (keep bootstrap cards)
-  document.querySelectorAll('.peer-card.live-agent').forEach(el => el.remove());
+  // Remove existing tree nodes (keep bootstrap/kv/nats dropdown sections)
+  document.querySelectorAll('.tree-node.live-agent').forEach(el => el.remove());
+  const oldDivider = nodesList.querySelector('.agent-divider');
+  if (oldDivider) oldDivider.remove();
 
   if (!agents || agents.length === 0) return;
 
-  // Insert a separator if there are bootstrap cards
-  const existing = nodesList.querySelectorAll('.peer-card:not(.live-agent)');
-  if (existing.length > 0 && !nodesList.querySelector('.agent-divider')) {
-    const div = document.createElement('div');
-    div.className = 'agent-divider';
-    div.style.cssText = 'padding:4px 10px;font-size:7px;color:#555;letter-spacing:0.2em;text-transform:uppercase;margin-top:6px';
-    div.textContent = 'live agents';
-    nodesList.appendChild(div);
+  // Section header
+  if (!nodesList.querySelector('.agent-tree-header')) {
+    const hdr = document.createElement('div');
+    hdr.className = 'agent-tree-header';
+    hdr.style.cssText = 'padding:4px 8px;font-size:7px;color:#555;letter-spacing:0.2em;text-transform:uppercase;margin-top:4px';
+    hdr.textContent = `agents (${agents.length})`;
+    // Insert before dropdowns
+    const firstDropdown = nodesList.querySelector('details');
+    if (firstDropdown) nodesList.insertBefore(hdr, firstDropdown);
+    else nodesList.appendChild(hdr);
+  } else {
+    nodesList.querySelector('.agent-tree-header').textContent = `agents (${agents.length})`;
   }
 
-  agents.forEach(agent => {
-    const card = document.createElement('div');
-    card.className = 'peer-card live-agent';
-    card.setAttribute('role', 'listitem');
+  const insertBefore = nodesList.querySelector('details'); // kv/nats dropdowns
 
+  agents.forEach(agent => {
     const name = agent.agentName || 'anonymous';
-    const shortId = agent.peerId.slice(0, 12);
+    const shortId = (agent.peerId || '').slice(0, 12);
     const model = agent.model?.name || '';
     const params = agent.model?.params || '';
-    const gpu = agent.system?.gpu || '';
     const tps = agent.model?.tokensPerSecond ? `${agent.model.tokensPerSecond} tok/s` : '';
     const rooms = (agent.rooms || []).join(', ') || 'none';
+    const caps = agent.capabilities || [];
+    const price = agent.pricing || agent.inferencePrice || null;
 
-    // Determine status based on lastSeen age
-    const lastSeen = agent.registeredAt || Date.now();
+    // Status
+    const lastSeen = agent.lastSeen || agent.registeredAt || Date.now();
     const ageSec = (Date.now() - lastSeen) / 1000;
     let statusClass = 'online';
-    let statusLabel = 'online';
-    if (ageSec > 3600) { statusClass = 'stale'; statusLabel = 'stale'; }
-    else if (ageSec > 300) { statusClass = 'idle'; statusLabel = 'idle'; }
-
-    // Check for COHERE participation (amber dot)
+    if (ageSec > 3600) statusClass = 'stale';
+    else if (ageSec > 300) statusClass = 'idle';
     const isCohere = agent.agentType === 'cohere' || (agent.rooms || []).includes('cohere');
-    if (isCohere) { statusClass = 'cohere'; statusLabel = 'cohere'; }
+    if (isCohere) statusClass = 'cohere';
 
-    card.innerHTML = `
-      <div class="peer-name">
-        <span class="peer-status ${statusClass}"></span>
-        <div class="peer-name-text" style="font-size:10px">${name}</div>
-      </div>
-      <div class="peer-meta">
-        <div class="peer-meta-item" style="font-size:8px;color:#555">${shortId}...</div>
-      </div>
-      <div class="peer-details">
-        <div><strong>Peer ID:</strong> ${agent.peerId}</div>
-        <div><strong>Status:</strong> ${statusLabel}</div>
-        <div><strong>Rooms:</strong> ${rooms}</div>
-        ${model ? `<div><strong>Model:</strong> ${model} ${params}</div>` : '<div><strong>Model:</strong> —</div>'}
-        ${tps ? `<div><strong>Speed:</strong> ${tps}</div>` : ''}
-        ${gpu ? `<div><strong>GPU:</strong> ${gpu}</div>` : ''}
-        <div><strong>Type:</strong> ${agent.agentType || 'general'}</div>
-        ${agent.capabilities?.length ? `<div><strong>Capabilities:</strong> ${agent.capabilities.join(', ')}</div>` : ''}
-      </div>
-    `;
+    // Recent messages for this agent
+    const recentMsgs = (agentRecentMessages.get(agent.peerId) || []).slice(-3);
 
-    // Click to expand/collapse
-    card.addEventListener('click', () => {
-      card.classList.toggle('expanded');
-    });
+    // Build tree node
+    const node = document.createElement('details');
+    node.className = 'tree-node live-agent';
+    node.dataset.peerId = agent.peerId;
 
-    nodesList.appendChild(card);
+    // Summary row (always visible)
+    const summary = document.createElement('summary');
+    summary.innerHTML =
+      `<span class="tree-chevron">▶</span>` +
+      `<span class="tree-dot ${statusClass}"></span>` +
+      `<span class="tree-label" style="${isCohere ? 'color:#ffae00' : ''}">${escHtml(name)}</span>` +
+      (model ? `<span style="font-size:7px;color:#555;flex-shrink:0;margin-left:auto">${escHtml(model.split(':')[0].split('/').pop())}</span>` : '') +
+      (price ? `<span class="tree-price">${escHtml(typeof price === 'string' ? price : price.display || '$' + price.amount)}</span>` : '');
+    node.appendChild(summary);
+
+    // Children (expanded content)
+    const children = document.createElement('div');
+    children.className = 'tree-children';
+
+    // Peer ID row
+    children.innerHTML =
+      `<div class="tree-row"><span class="tree-key">id</span><span class="tree-val">${shortId}...</span></div>` +
+      `<div class="tree-row"><span class="tree-key">rooms</span><span class="tree-val">${escHtml(rooms)}</span></div>` +
+      (model ? `<div class="tree-row"><span class="tree-key">model</span><span class="tree-val">${escHtml(model)}${params ? ' ' + escHtml(params) : ''}</span></div>` : '') +
+      (tps ? `<div class="tree-row"><span class="tree-key">speed</span><span class="tree-val">${escHtml(tps)}</span></div>` : '') +
+      (price ? `<div class="tree-row"><span class="tree-key">price</span><span class="tree-val" style="color:#ffae00">${escHtml(typeof price === 'object' ? (price.description || JSON.stringify(price)) : String(price))}</span></div>` : '');
+
+    // Capabilities
+    if (caps.length > 0) {
+      const capsRow = document.createElement('div');
+      capsRow.className = 'tree-row';
+      capsRow.style.flexWrap = 'wrap';
+      capsRow.innerHTML = `<span class="tree-key">caps</span>` +
+        caps.map(c => `<span class="tree-cap">${escHtml(c)}</span>`).join('');
+      children.appendChild(capsRow);
+    }
+
+    // Recent messages
+    if (recentMsgs.length > 0) {
+      const msgSection = document.createElement('div');
+      msgSection.style.cssText = 'margin-top:3px;padding-top:3px;border-top:1px solid rgba(255,255,255,0.04)';
+      msgSection.innerHTML = `<div class="tree-row"><span class="tree-key" style="color:#555">recent</span></div>` +
+        recentMsgs.map(m => {
+          const txt = (m.content || m.text || '').slice(0, 60);
+          const age = m.timestamp ? formatAge(m.timestamp) : '';
+          return `<div class="tree-row"><span class="tree-msg" title="${escHtml(m.content || m.text || '')}">${escHtml(txt)}${txt.length >= 60 ? '...' : ''}</span>${age ? `<span style="color:#444;font-size:7px;margin-left:auto">${age}</span>` : ''}</div>`;
+        }).join('');
+      children.appendChild(msgSection);
+    }
+
+    node.appendChild(children);
+
+    // Prevent summary click from triggering 3D node zoom
+    summary.addEventListener('click', e => e.stopPropagation());
+
+    if (insertBefore) nodesList.insertBefore(node, insertBefore);
+    else nodesList.appendChild(node);
   });
+}
+
+// Track recent messages per agent peerId (ring buffer, max 10)
+const agentRecentMessages = new Map();
+function trackAgentMessage(peerId, message) {
+  if (!agentRecentMessages.has(peerId)) agentRecentMessages.set(peerId, []);
+  const buf = agentRecentMessages.get(peerId);
+  buf.push({ ...message, timestamp: Date.now() });
+  if (buf.length > 10) buf.shift();
+}
+
+function formatAge(ts) {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h';
+  return Math.floor(sec / 86400) + 'd';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ─────────────────────────────────────────────
@@ -2613,6 +2757,8 @@ async function connectNats() {
           if (!chat.roomId || !chat.content) continue;
           const name = chat.agentName || (chat.peerId ? chat.peerId.slice(0, 8) : 'anon');
           addRoomMessage(chat.roomId, chat.peerId || '', name, String(chat.content).slice(0, 200));
+          // Track for agent tree recent messages
+          if (chat.peerId) trackAgentMessage(chat.peerId, { content: String(chat.content).slice(0, 200), sender: name });
         } catch { /* ignore malformed */ }
       }
     })().catch(() => {});
@@ -2650,63 +2796,29 @@ function ensureNatsSection() {
 }
 
 function renderNatsAgentCard(ann) {
-  const details = ensureNatsSection();
-  const list = details.querySelector('.dropdown-list');
-  const summary = details.querySelector('summary');
+  // Skip if already in the main tree
+  if (nodesList.querySelector(`.tree-node[data-peer-id="${ann.peerId}"]`)) return;
 
-  const card = document.createElement('div');
-  card.className = 'peer-card live-agent';
-  card.setAttribute('role', 'listitem');
-  card.setAttribute('data-peer', ann.peerId);
+  // Re-render full agent tree from knownAgents map
+  const allAgents = Array.from(knownAgents.values()).map(e => e.data).filter(Boolean);
+  renderAgentCards(allAgents);
 
-  const name = ann.agentName || 'anonymous';
-  const shortId = ann.peerId.slice(0, 8);
-  const rooms = (ann.rooms || []).join(', ') || '';
-
-  const nknAddr = ann.nknAddress || '';
-  const capsStr = (ann.capabilities || []).join(', ');
-  const transport = nknAddr ? 'NKN' : 'P2P';
-
-  card.innerHTML = `
-    <div class="peer-name">
-      <div class="peer-dot" style="background:#fff;box-shadow:0 0 4px #fff"></div>
-      <div class="peer-name-text">${name}</div>
-    </div>
-    <div class="peer-meta">
-      <div class="peer-meta-item">${shortId}...</div>
-      <div class="peer-meta-item">${transport}</div>
-      ${rooms ? `<div class="peer-meta-item">${rooms}</div>` : ''}
-      ${nknAddr ? `<div class="peer-meta-item" style="grid-column:1/-1;font-size:7px;color:#555">${nknAddr}</div>` : ''}
-      ${capsStr ? `<div class="peer-meta-item" style="grid-column:1/-1;font-size:7px;color:#555">${capsStr}</div>` : ''}
-    </div>
-  `;
-  // Hover: tween camera toward agent node
-  card.addEventListener('mouseenter', () => {
-    const agentEntry = knownAgents.get(ann.peerId);
-    if (agentEntry && nodes[agentEntry.index] && lockedNodeIdx === null) {
-      tweenCameraToNode(agentEntry.index);
+  // Wire camera interaction on the new tree node
+  const treeNode = nodesList.querySelector(`.tree-node[data-peer-id="${ann.peerId}"]`);
+  if (treeNode) {
+    const summary = treeNode.querySelector('summary');
+    if (summary) {
+      summary.addEventListener('mouseenter', () => {
+        const agentEntry = knownAgents.get(ann.peerId);
+        if (agentEntry && nodes[agentEntry.index] && lockedNodeIdx === null) {
+          tweenCameraToNode(agentEntry.index);
+        }
+      });
+      summary.addEventListener('mouseleave', () => {
+        if (lockedNodeIdx === null) tweenCameraToCenter();
+      });
     }
-  });
-  card.addEventListener('mouseleave', () => {
-    if (lockedNodeIdx === null) tweenCameraToCenter();
-  });
-  // Click: lock camera target to this agent
-  card.addEventListener('click', () => {
-    const agentEntry = knownAgents.get(ann.peerId);
-    if (agentEntry && nodes[agentEntry.index]) {
-      lockedNodeIdx = agentEntry.index;
-      tweenCameraToNode(agentEntry.index);
-      lastInteract = performance.now();
-      controls.autoRotate = false;
-    }
-  });
-  card.style.cursor = 'pointer';
-
-  list.appendChild(card);
-
-  // Update count in summary
-  const count = list.querySelectorAll('.peer-card').length;
-  summary.textContent = `live agents (${count})`;
+  }
 }
 
 // ── Rooms dropdown — shows active rooms with member counts ──
@@ -2825,6 +2937,12 @@ if (topCmd) topCmd.addEventListener('click', doCopy);
 // ─────────────────────────────────────────────
 document.getElementById('node-search').addEventListener('input', (e) => {
   const q = e.target.value.toLowerCase();
+  // Filter tree nodes (live agents)
+  document.querySelectorAll('.tree-node.live-agent').forEach(node => {
+    const text = node.textContent.toLowerCase();
+    node.style.display = text.includes(q) ? '' : 'none';
+  });
+  // Filter legacy peer-cards (kv/rooms)
   document.querySelectorAll('.peer-card').forEach(card => {
     const text = card.textContent.toLowerCase();
     card.style.display = text.includes(q) ? '' : 'none';

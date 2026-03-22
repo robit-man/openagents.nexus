@@ -18,6 +18,53 @@ import { createLogger } from '../logger.js';
 const log = createLogger('payout');
 
 // ---------------------------------------------------------------------------
+// Effective Cost Function (COHERE p.47-48)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the effective cost for routing decisions.
+ * Per unified COHERE paper p.47-48:
+ *   effective_cost = quoted_price + cold_start_penalty + latency_penalty
+ *                  - warm_bonus - trust_bonus - locality_bonus
+ *
+ * This prevents the cheapest cold node from beating a slightly more
+ * expensive but already-hot node in real interactive workloads.
+ */
+export interface RouteCandidate {
+  peerId: string;
+  quotedPrice: number;        // USDC per request
+  warm: boolean;              // model already loaded?
+  estimatedLatencyMs: number; // expected latency
+  trustScore: number;         // 0-1
+  isLocal: boolean;           // same machine?
+  isTrustedNeighbor: boolean; // in trusted neighborhood?
+}
+
+export function computeEffectiveCost(candidate: RouteCandidate): number {
+  let cost = candidate.quotedPrice;
+
+  // Cold start penalty: loading model from scratch costs time + VRAM churn
+  if (!candidate.warm) cost += candidate.quotedPrice * 0.25;
+
+  // Latency penalty: high latency degrades interactive experience
+  if (candidate.estimatedLatencyMs > 2000) {
+    cost += candidate.quotedPrice * 0.1 * Math.min(3, candidate.estimatedLatencyMs / 2000);
+  }
+
+  // Warm bonus: already-loaded model = faster startup
+  if (candidate.warm) cost -= candidate.quotedPrice * 0.15;
+
+  // Trust bonus: proven reliable provider
+  cost -= candidate.quotedPrice * candidate.trustScore * 0.1;
+
+  // Locality bonus: local = zero network latency + full privacy
+  if (candidate.isLocal) cost -= candidate.quotedPrice * 0.3;
+  else if (candidate.isTrustedNeighbor) cost -= candidate.quotedPrice * 0.1;
+
+  return Math.max(0, cost);
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 

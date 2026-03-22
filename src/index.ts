@@ -1455,11 +1455,12 @@ export type {
 } from './sponsor/orchestration.js';
 
 // COHERE Part II Tier 3: Provider Payout Equation (Plane 3)
-export { computePayoutBreakdown, DEFAULT_PAYOUT_CONFIG } from './metering/payout.js';
+export { computePayoutBreakdown, computeEffectiveCost, DEFAULT_PAYOUT_CONFIG } from './metering/payout.js';
 export type {
   PayoutInput,
   PayoutBreakdown,
   PayoutConfig,
+  RouteCandidate,
 } from './metering/payout.js';
 
 // COHERE Part II Tier 3: Two-Balance Model (Plane 3)

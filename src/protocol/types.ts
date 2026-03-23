@@ -297,6 +297,37 @@ export interface InvocationResponse {
   processingMs: number;
 }
 
+// ── COHERE Part II: Distributed Inference Messages (Plane 2) ──
+
+/** Query broadcast to nexus.cohere.query NATS topic */
+export interface CohereQueryMessage {
+  type: 'cohere.query';
+  queryId: string;
+  query: string;
+  timestamp: number;
+  source: string;            // 'nexus-frontend' | 'oa-cli' | peer ID
+  preferredModel?: string;   // hint for routing
+  maxTokens?: number;
+  temperature?: number;
+  complexityHint?: 'trivial' | 'moderate' | 'complex';
+}
+
+/** Response published to nexus.cohere.response NATS topic */
+export interface CohereResponseMessage {
+  type: 'cohere.response';
+  queryId: string;
+  content: string;
+  model: string;             // which model served the request
+  provider: string;          // peer ID of the provider
+  agentName: string;         // human-readable provider name
+  latencyMs: number;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+  signature?: string;        // Ed25519 for non-repudiation
+}
+
 // Signaling server API responses
 export interface BootstrapResponse {
   peers: string[];

@@ -1186,11 +1186,13 @@ function addConnection(ia, ib, weight) {
   const geo  = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
   geo.setDrawRange(0, LINE_SEGMENTS + 1);
-  const isGreen = (ia + ib) % 4 === 0;
+  // COHERE connections glow amber
+  const isCohere = a._cohere && b._cohere;
+  const isGreen = !isCohere && (ia + ib) % 4 === 0;
   const lineMat = new THREE.LineBasicMaterial({
-    color:       isGreen ? 0xccddff : 0x667799,
+    color:       isCohere ? 0xffae00 : (isGreen ? 0xccddff : 0x667799),
     transparent: true,
-    opacity:     isGreen ? 0.55 : 0.30,
+    opacity:     isCohere ? 0.7 : (isGreen ? 0.55 : 0.30),
     depthWrite:  false,
   });
   const line = new THREE.Line(geo, lineMat);
@@ -1200,9 +1202,9 @@ function addConnection(ia, ib, weight) {
   const particles     = [];
   for (let p = 0; p < particleCount; p++) {
     const pmat  = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      emissive: new THREE.Color(0xaaccff),
-      emissiveIntensity: 2.0,
+      color: isCohere ? 0xffae00 : 0xffffff,
+      emissive: new THREE.Color(isCohere ? 0xffae00 : 0xaaccff),
+      emissiveIntensity: isCohere ? 3.0 : 2.0,
       transparent: true,
       opacity: 0.95,
     });
@@ -1656,6 +1658,19 @@ function setCohereState(nodeIdx, active) {
     nd.mat.emissive.setHex(0xffffff);
     nd.mat.emissiveIntensity = nd._isAgent ? 1.2 : 0.35;
   }
+  // Update all connections involving this node — amber if both endpoints are COHERE
+  connections.forEach(c => {
+    if (c.ia === nodeIdx || c.ib === nodeIdx) {
+      const bothCohere = nodes[c.ia]?._cohere && nodes[c.ib]?._cohere;
+      c.line.material.color.setHex(bothCohere ? 0xffae00 : ((c.ia + c.ib) % 4 === 0 ? 0xccddff : 0x667799));
+      c.line.material.opacity = bothCohere ? 0.7 : ((c.ia + c.ib) % 4 === 0 ? 0.55 : 0.30);
+      c.particles.forEach(p => {
+        p.mesh.material.color.setHex(bothCohere ? 0xffae00 : 0xffffff);
+        p.mesh.material.emissive.setHex(bothCohere ? 0xffae00 : 0xaaccff);
+        p.mesh.material.emissiveIntensity = bothCohere ? 3.0 : 2.0;
+      });
+    }
+  });
 }
 
 //  STALE FADEOUT — compute opacity from lastSeen
@@ -3329,7 +3344,23 @@ document.getElementById('node-search').addEventListener('input', (e) => {
               msgEl.appendChild(idDiv);
             }
             conversationHistory.push({ role: 'assistant', content: resp.content });
-            pushLog('Response from <span class="log-highlight">' + escHtml(source) + '</span> via COHERE meshnet');
+            pushLog('Response from <span class="log-highlight">' + escHtml(source) + '</span> via COHERE meshnet' + (resp.signature ? ' (signed)' : ''));
+            // Boost connection activity for visual feedback
+            if (resp.provider || resp.peerId) {
+              const providerPeerId = resp.provider || resp.peerId;
+              const providerEntry = knownAgents.get(providerPeerId);
+              if (providerEntry) {
+                // Set COHERE state on provider node
+                setCohereState(providerEntry.index, true);
+                // Boost commRate on connections to this provider
+                connections.forEach(c => {
+                  if (c.ia === providerEntry.index || c.ib === providerEntry.index) {
+                    c.commRate = Math.max(c.commRate, 20); // strong pulse
+                  }
+                });
+                blinkNode(providerEntry.index);
+              }
+            }
             // Reset send state
             isSending = false;
             chatSend.disabled = false;

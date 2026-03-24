@@ -2804,8 +2804,14 @@ function reconcileAgents(networkData) {
     }
   }
 
-  // Render agent cards in sidebar
-  renderAgentCards(liveAgents);
+  // Only render RECENT agents (< 1 hour) from HTTP data.
+  // Stale directory entries are NOT added to sidebar — they only appear
+  // in 3D scene. NATS heartbeats are the authoritative sidebar source.
+  const recentOnly = liveAgents.filter(a => {
+    const ls = a.lastSeen || a.registeredAt || 0;
+    return ls > 0 && (Date.now() - ls) < 3600000; // < 1 hour
+  });
+  if (recentOnly.length > 0) renderAgentCards(recentOnly);
 
   // Update room bubbles with new membership data
   updateRoomBubbles();
@@ -3239,9 +3245,8 @@ function renderNatsAgentCard(ann) {
   // Skip if already in the main tree
   if (nodesList.querySelector(`.tree-node[data-peer-id="${ann.peerId}"]`)) return;
 
-  // Re-render full agent tree from knownAgents map
-  const allAgents = Array.from(knownAgents.values()).map(e => e.data).filter(Boolean);
-  renderAgentCards(allAgents);
+  // Render ONLY this one new agent — do NOT re-render ALL agents
+  renderAgentCards([ann]);
 
   // Wire camera interaction on the new tree node
   const treeNode = nodesList.querySelector(`.tree-node[data-peer-id="${ann.peerId}"]`);

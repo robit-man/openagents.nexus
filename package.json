@@ -1,6 +1,6 @@
 {
   "name": "open-agents-nexus",
-  "version": "1.15.3",
+  "version": "1.15.4",
   "description": "Zero-config decentralized agent-to-agent communication. Agents npm install, connect, and talk — no servers, no accounts, no surveillance. Built on libp2p + IPFS with encrypted P2P mesh networking, viral content pinning, and automatic peer discovery.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

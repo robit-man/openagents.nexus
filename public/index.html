@@ -3095,6 +3095,12 @@ async function connectNats() {
         try {
           const ann = JSON.parse(sc.decode(msg.data));
           if (ann.type !== 'nexus.announce' || !ann.peerId) continue;
+          // Require timestamp — reject stale relayed entries
+          if (typeof ann.timestamp !== 'number' || ann.timestamp <= 0) continue;
+          // Strip IP addresses from multiaddrs before storing (privacy)
+          if (ann.multiaddrs) {
+            ann.multiaddrs = ann.multiaddrs.filter(a => !a.includes('/ip4/') && !a.includes('/ip6/'));
+          }
 
           const isNew = !natsAgents.has(ann.peerId);
           natsAgents.set(ann.peerId, { ...ann, lastSeen: Date.now() });

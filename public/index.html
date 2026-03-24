@@ -2756,8 +2756,23 @@ let knownPeerCount = 0;
 const knownAgents = new Map(); // peerId -> { index in nodes[], data }
 
 function reconcileAgents(networkData) {
-  const liveAgents = networkData.knownAgents || networkData.agents || [];
+  let liveAgents = networkData.knownAgents || networkData.agents || [];
   if (liveAgents.length === 0) return;
+
+  // FILTER: only process agents with a NATS heartbeat in the last hour.
+  // The HTTP directory/KV contains 60+ stale entries from days/weeks ago
+  // that lack proper lastSeen timestamps. Don't add them to the 3D scene
+  // OR the sidebar — they create ghost nodes that flood the interface.
+  const ONE_HOUR = 3600000;
+  liveAgents = liveAgents.filter(a => {
+    if (!a.peerId) return false;
+    // Only accept agents with a recent timestamp
+    const ts = a.lastSeen || a.timestamp || 0;
+    if (ts > 0 && (Date.now() - ts) < ONE_HOUR) return true;
+    // registeredAt is NOT a lastSeen — it's when they first appeared in KV.
+    // Don't use it as a proxy for liveness.
+    return false;
+  });
 
   let added = 0;
   liveAgents.forEach(agent => {

@@ -38,6 +38,26 @@ export interface NatsAgentAnnouncement {
   identityVersion?: number;
   /** COHERE identity kernel — coherence score from homeostasis (0-1) */
   identityCoherence?: number;
+
+  // ── WO-VIS1: Emotional + Memory State ──────────────────────────────
+  /** Emotional state derived from agent activity + identity homeostasis */
+  emotionalState?: 'neutral' | 'focused' | 'stressed' | 'dreaming' | 'excited';
+  /** Arousal level 0-1 (how active/energized the agent is) */
+  arousal?: number;
+  /** Valence 0-1 (positive vs negative — derived from memory sentiment) */
+  valence?: number;
+  /** Total active procedural memories in structured store */
+  memoryCount?: number;
+  /** Memory sentiment: proactive (more strategies) vs defensive (more recoveries) */
+  memorySentiment?: 'proactive' | 'defensive' | 'neutral';
+  /** Total IPFS/Helia blockstore size in bytes */
+  ipfsStorageBytes?: number;
+  /** Tasks completed in the last hour */
+  taskRate?: number;
+  /** Average tool calls per minute (recent) */
+  toolCallRate?: number;
+  /** Number of insights shared via COHERE learning channel */
+  cohereLearnings?: number;
 }
 
 /**

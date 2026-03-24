@@ -909,6 +909,16 @@ scene.add(particleGroup);
 
 const connections = []; // { curve, line, particles, ia, ib, weight }
 
+// ── COHERE inference tracking ──
+const cohereCapableNodes = new Map(); // peerId -> { agentName, models, warmModel, lastSeen }
+// Prune stale capacity entries every 60s (nodes that haven't announced in 5 min)
+setInterval(() => {
+  const cutoff = Date.now() - 300_000;
+  for (const [pid, entry] of cohereCapableNodes) {
+    if (entry.lastSeen < cutoff) cohereCapableNodes.delete(pid);
+  }
+}, 60_000);
+
 // ── ROOM BUBBLE VISUALIZATION ──
 const roomGroup = new THREE.Group();
 scene.add(roomGroup);
@@ -1024,56 +1034,90 @@ function undulateCore(time) {
   coreIco.rotation.y += 0.006 + sceneActivity * 0.018;
 }
 
-// ── TextSprite — enhanced text display for bubble surface messages ──
+// ── TextSprite — dynamically sized text display for bubble surface messages ──
 function TextSprite(text, opts = {}) {
+  const fontSize = opts.fontSize || 14;
+  const fontStr = (opts.bold ? 'bold ' : '') + fontSize + 'px Courier New';
+  const pad = 24;      // horizontal padding (12px each side)
+  const pillPad = 10;  // vertical padding in pill
+  const maxChars = opts.maxChars || 120;
+
+  // Truncate long text before measuring
+  let display = text.length > maxChars ? text.slice(0, maxChars - 3) + '...' : text;
+
+  // Measure text on a temp canvas to get actual width
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = fontStr;
+  const measured = measure.measureText(display).width;
+
+  // Size canvas to fit content — power-of-2 friendly, min 128, max 2048
+  const pillH = fontSize + pillPad;
+  const neededW = Math.ceil(measured + pad + 8);
+  const neededH = pillH + 16;
   const cv = document.createElement('canvas');
-  cv.width = opts.width || 512;
-  cv.height = opts.height || 64;
+  cv.width  = Math.min(2048, Math.max(128, nextPow2(neededW)));
+  cv.height = Math.min(128, Math.max(32, nextPow2(neededH)));
+
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
-  const fontSize = opts.fontSize || 14;
-  ctx.font = (opts.bold ? 'bold ' : '') + fontSize + 'px Courier New';
-  const textWidth = Math.min(ctx.measureText(text).width + 16, cv.width - 8);
-  const pillH = fontSize + 10;
+  ctx.font = fontStr;
+
+  // Draw pill background sized to actual text
+  const pillW = Math.min(measured + pad, cv.width - 8);
   const pillY = (cv.height - pillH) / 2;
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   if (ctx.roundRect) {
     ctx.beginPath();
-    ctx.roundRect(4, pillY, textWidth, pillH, 4);
+    ctx.roundRect(4, pillY, pillW, pillH, 4);
     ctx.fill();
   } else {
-    ctx.fillRect(4, pillY, textWidth, pillH);
+    ctx.fillRect(4, pillY, pillW, pillH);
   }
+
   ctx.fillStyle = opts.color || 'rgba(255,255,255,0.95)';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  let display = text;
-  if (ctx.measureText(text).width > cv.width - 24) {
-    while (ctx.measureText(display + '...').width > cv.width - 24 && display.length > 0) display = display.slice(0, -1);
-    display += '...';
-  }
   ctx.fillText(display, 12, cv.height / 2);
+
   const tex = new THREE.CanvasTexture(cv);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
-  spr.scale.set(opts.scaleX || 3.5, opts.scaleY || 0.44, 1);
+
+  // Scale sprite proportionally to canvas aspect ratio
+  const aspect = cv.width / cv.height;
+  const baseH = opts.scaleY || 0.44;
+  spr.scale.set(baseH * aspect, baseH, 1);
+  spr._textWidth = pillW;  // expose for layout
+  spr._canvasW = cv.width;
   return spr;
 }
 
+function nextPow2(v) {
+  v--;
+  v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+  return v + 1;
+}
+
 function makeLabelSprite(text) {
+  const fontStr = 'bold 18px Courier New';
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = fontStr;
+  const measured = measure.measureText(text).width;
+
   const cv  = document.createElement('canvas');
-  cv.width  = 256;
+  cv.width  = Math.min(1024, Math.max(64, nextPow2(Math.ceil(measured + 32))));
   cv.height = 48;
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, 256, 48);
-  ctx.font      = 'bold 18px Courier New';
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.font      = fontStr;
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.textAlign = 'center';
-  ctx.fillText(text, 128, 30);
+  ctx.fillText(text, cv.width / 2, 30);
   const tex = new THREE.CanvasTexture(cv);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
-  spr.scale.set(2.0, 0.38, 1);
+  const aspect = cv.width / cv.height;
+  spr.scale.set(0.38 * aspect, 0.38, 1);
   return spr;
 }
 
@@ -1400,41 +1444,51 @@ function removeBubble(roomId) {
 }
 
 function makeRoomLabel(roomId) {
+  const fontStr = 'bold 16px Courier New';
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = fontStr;
+  const measured = measure.measureText(roomId).width;
+
   const cv = document.createElement('canvas');
-  cv.width = 256;
+  cv.width  = Math.min(1024, Math.max(64, nextPow2(Math.ceil(measured + 32))));
   cv.height = 48;
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, 256, 48);
-  ctx.font = 'bold 16px Courier New';
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.font = fontStr;
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
   ctx.textAlign = 'center';
-  ctx.fillText(roomId, 128, 30);
+  ctx.fillText(roomId, cv.width / 2, 30);
   const tex = new THREE.CanvasTexture(cv);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
-  spr.scale.set(2.5, 0.47, 1);
+  const aspect = cv.width / cv.height;
+  spr.scale.set(0.47 * aspect, 0.47, 1);
   return spr;
 }
 
 function makeChatSprite(text) {
+  const fontStr = '12px Courier New';
+  const maxChars = 150;
+  let display = text.length > maxChars ? text.slice(0, maxChars - 3) + '...' : text;
+
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = fontStr;
+  const measured = measure.measureText(display).width;
+
   const cv = document.createElement('canvas');
-  cv.width = 512;
+  cv.width  = Math.min(2048, Math.max(128, nextPow2(Math.ceil(measured + 24))));
   cv.height = 48;
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, 512, 48);
-  ctx.font = '12px Courier New';
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.font = fontStr;
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.textAlign = 'left';
-  let display = text;
-  if (ctx.measureText(text).width > 480) {
-    while (ctx.measureText(display + '...').width > 480 && display.length > 0) display = display.slice(0, -1);
-    display += '...';
-  }
   ctx.fillText(display, 8, 30);
   const tex = new THREE.CanvasTexture(cv);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
-  spr.scale.set(3.5, 0.42, 1);
+  const aspect = cv.width / cv.height;
+  spr.scale.set(0.42 * aspect, 0.42, 1);
   return spr;
 }
 
@@ -3124,21 +3178,34 @@ async function connectNats() {
           if (isNew) {
             const label = ann.agentName || ann.peerId.slice(0, 8);
 
-            // Dedup by agentName — same mnemonic but new peerId means daemon restarted
-            const existingByName = Array.from(knownAgents.entries()).find(
+            // Dedup by agentName — same mnemonic but new peerId = daemon restarted
+            // Find ALL existing entries with same name and remove them
+            const dupes = Array.from(knownAgents.entries()).filter(
               ([, v]) => v.data?.agentName === label && v.data?.agentName
             );
-            if (existingByName) {
-              // Reuse existing node, update peerId mapping
-              const [oldPeerId, oldEntry] = existingByName;
-              natsAgents.delete(oldPeerId);
-              knownAgents.delete(oldPeerId);
-              knownAgents.set(ann.peerId, { index: oldEntry.index, data: ann });
-              if (nodes[oldEntry.index]) {
-                nodes[oldEntry.index].lastSeen = Date.now();
-                hydrateNodeState(oldEntry.index, ann);
+            if (dupes.length > 0) {
+              // Remove all old entries with this name — keep only the new one
+              for (const [oldPeerId, oldEntry] of dupes) {
+                natsAgents.delete(oldPeerId);
+                knownAgents.delete(oldPeerId);
+                // Remove sidebar DOM node for old peerId
+                const oldDom = nodesList.querySelector(`.tree-node[data-peer-id="${oldPeerId}"]`);
+                if (oldDom) oldDom.remove();
+                // Hide 3D node (fade out instantly)
+                if (nodes[oldEntry.index]) {
+                  nodes[oldEntry.index].lastSeen = 0; // triggers immediate fade
+                }
               }
-              continue; // don't create duplicate node
+              // Reuse the first dupe's 3D node index if possible
+              const reuseIdx = dupes[0][1].index;
+              if (nodes[reuseIdx]) {
+                nodes[reuseIdx].lastSeen = Date.now();
+                knownAgents.set(ann.peerId, { index: reuseIdx, data: ann });
+                hydrateNodeState(reuseIdx, ann);
+                // Create fresh sidebar card
+                renderNatsAgentCard(ann);
+                continue;
+              }
             }
 
             pushLog(`<span class="log-highlight">${label}</span> discovered via NATS`);
@@ -3201,6 +3268,41 @@ async function connectNats() {
                 (conn.ia === toAgent.index && conn.ib === fromAgent.index)) {
               conn.commRate += (ev.tokensPerSec || 1) * 0.1;
             }
+          }
+        } catch { /* ignore malformed */ }
+      }
+    })().catch(() => {});
+
+    // Subscribe to capacity announcements to track COHERE-capable nodes
+    const capSub = nc.subscribe('nexus.agents.capacity');
+    (async () => {
+      for await (const msg of capSub) {
+        try {
+          const cap = JSON.parse(sc.decode(msg.data));
+          if (!cap.peerId) continue;
+          if (cap.cohereActive && cap.models && cap.models.length > 0) {
+            cohereCapableNodes.set(cap.peerId, {
+              agentName: cap.agentName || cap.peerId.slice(0, 8),
+              models: cap.models,
+              warmModel: cap.warmModel,
+              lastSeen: Date.now(),
+            });
+            // Mark the 3D node as COHERE-active
+            const entry = knownAgents.get(cap.peerId);
+            if (entry) setCohereState(entry.index, true);
+          } else {
+            cohereCapableNodes.delete(cap.peerId);
+            const entry = knownAgents.get(cap.peerId);
+            if (entry) setCohereState(entry.index, false);
+          }
+          // Update COHERE chat status with live inference node count
+          const chatStatus = document.getElementById('cohere-chat-status');
+          if (chatStatus && !chatStatus._sending) {
+            const count = cohereCapableNodes.size;
+            chatStatus.textContent = count > 0
+              ? count + ' inference node' + (count > 1 ? 's' : '') + ' online'
+              : 'no inference nodes';
+            chatStatus.style.color = count > 0 ? '#55cc55' : '#555';
           }
         } catch { /* ignore malformed */ }
       }
@@ -3679,8 +3781,12 @@ document.getElementById('node-search').addEventListener('input', (e) => {
             // Reset send state
             isSending = false;
             chatSend.disabled = false;
-            chatStatus.textContent = 'distributed mind';
-            chatStatus.style.color = '#555';
+            chatStatus._sending = false;
+            const capN = cohereCapableNodes.size;
+            chatStatus.textContent = capN > 0
+              ? capN + ' inference node' + (capN > 1 ? 's' : '') + ' online'
+              : 'distributed mind';
+            chatStatus.style.color = capN > 0 ? '#55cc55' : '#555';
           } catch { /* ignore malformed */ }
         }
       })().catch(() => {});
@@ -3761,6 +3867,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     addMessage(text, 'user');
 
     // Show typing indicator
+    chatStatus._sending = true;
     chatStatus.textContent = 'thinking...';
     chatStatus.style.color = '#ffae00';
     addTypingIndicator();
@@ -3795,17 +3902,38 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       const errMsg = err.message || 'unknown error';
       const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
 
-      if (isNetworkErr && meshnetSent && natsAgents.size > 0) {
-        // Local unavailable, meshnet query is out — wait for distributed response
-        chatStatus.textContent = 'awaiting meshnet (' + natsAgents.size + ' nodes)...';
+      if (isNetworkErr && meshnetSent && cohereCapableNodes.size > 0) {
+        // Local unavailable, but inference nodes exist on meshnet — wait for response
+        chatStatus.textContent = 'awaiting meshnet (' + cohereCapableNodes.size + ' inference nodes)...';
+        chatStatus._sending = true;
         chatStatus.style.color = '#4dabf7';
         const meshTimeout = setTimeout(() => {
           window._cohereMeshnetTimeout = null;
           removeTypingIndicator();
-          addMessage('No local Ollama running here. Meshnet query sent to ' +
-            natsAgents.size + ' node(s) but none responded with inference. ' +
-            'Run `oa` locally with `/cohere` to enable distributed inference.', 'agent', 'info');
-          chatStatus.textContent = 'distributed mind';
+          addMessage('Meshnet query sent to ' +
+            cohereCapableNodes.size + ' inference node(s) but none responded in time. ' +
+            'Nodes may be busy or their models may be loading.', 'agent', 'info');
+          chatStatus._sending = false;
+          chatStatus.textContent = cohereCapableNodes.size + ' inference node' + (cohereCapableNodes.size > 1 ? 's' : '') + ' online';
+          chatStatus.style.color = cohereCapableNodes.size > 0 ? '#55cc55' : '#555';
+          chatSend.disabled = false;
+          isSending = false;
+          chatInput.focus();
+        }, 15000);
+        window._cohereMeshnetTimeout = meshTimeout;
+        return;
+      } else if (isNetworkErr && meshnetSent && natsAgents.size > 0) {
+        // Peers exist but none have COHERE active
+        chatStatus.textContent = 'awaiting meshnet...';
+        chatStatus._sending = true;
+        chatStatus.style.color = '#4dabf7';
+        const meshTimeout = setTimeout(() => {
+          window._cohereMeshnetTimeout = null;
+          removeTypingIndicator();
+          addMessage(natsAgents.size + ' node(s) online but none have inference enabled. ' +
+            'Run `oa` and type `/cohere` on any node to expose its Ollama models to the mesh.', 'agent', 'info');
+          chatStatus._sending = false;
+          chatStatus.textContent = 'no inference nodes';
           chatStatus.style.color = '#555';
           chatSend.disabled = false;
           isSending = false;
@@ -3815,15 +3943,19 @@ document.getElementById('node-search').addEventListener('input', (e) => {
         return;
       } else if (isNetworkErr) {
         removeTypingIndicator();
-        addMessage('No local Ollama detected. Install Ollama and run a model, or start `oa` with `/cohere` to join the meshnet.', 'agent', 'info');
+        addMessage('No local Ollama detected and no mesh nodes available. Install Ollama and run a model, or start `oa` with `/cohere` to join the meshnet.', 'agent', 'info');
       } else {
         removeTypingIndicator();
         addMessage('Error: ' + errMsg, 'agent', 'error');
       }
     }
 
-    chatStatus.textContent = 'distributed mind';
-    chatStatus.style.color = '#555';
+    chatStatus._sending = false;
+    const capEnd = cohereCapableNodes.size;
+    chatStatus.textContent = capEnd > 0
+      ? capEnd + ' inference node' + (capEnd > 1 ? 's' : '') + ' online'
+      : 'no inference nodes';
+    chatStatus.style.color = capEnd > 0 ? '#55cc55' : '#555';
     chatSend.disabled = false;
     isSending = false;
     chatInput.focus();
@@ -3834,9 +3966,13 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) sendMessage();
   });
 
-  // Welcome message
-  const nodeCount = natsAgents.size || knownAgents.size || 0;
-  addMessage('COHERE distributed mind — ' + (nodeCount > 0 ? nodeCount + ' node(s) online' : 'connecting...') + '. Queries route to meshnet first, local Ollama as fallback. Identity kernels are signed, IPFS-pinned, and read-only from the query path.', 'agent', 'system');
+  // Welcome message — show actionable info based on inference availability
+  const capCount = cohereCapableNodes.size;
+  if (capCount > 0) {
+    addMessage('COHERE distributed mind — ' + capCount + ' inference node' + (capCount > 1 ? 's' : '') + ' online. Your queries will be routed to available nodes on the meshnet.', 'agent', 'system');
+  } else {
+    addMessage('COHERE distributed mind — no inference nodes detected yet. To participate: run `oa` locally, then type `/cohere` to expose your Ollama models to the mesh.', 'agent', 'system');
+  }
 }
 </script>
 </body>

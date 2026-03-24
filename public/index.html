@@ -1927,6 +1927,11 @@ function animate() {
       c.line.material.opacity = (baseOpacity + commIntensity * 0.5) * connOpacity;
     }
 
+    // Particle size scales by IPFS storage depth of connected nodes (packet size metaphor)
+    const aStorage = Math.min(2, 1 + (a._ipfsBytes || 0) / (5 * 1024 * 1024)); // 5MB = 2x
+    const bStorage = Math.min(2, 1 + (b._ipfsBytes || 0) / (5 * 1024 * 1024));
+    const storageFactor = (aStorage + bStorage) / 2;
+
     c.particles.forEach(p => {
       // Base speed + comm boost (up to 3x faster during active inference)
       p.t += p.speed * (1 + commIntensity * 2);
@@ -1934,11 +1939,21 @@ function animate() {
       c.curve.getPoint(p.t, _tmpOffset);
       p.mesh.position.copy(_tmpOffset);
       const wave = 0.5 + 0.5 * Math.sin(p.t * Math.PI * 2);
+
+      // Color: identity sync particles are gold, COHERE are amber, others white
+      if (hasSynchrny) {
+        p.mesh.material.color.setHex(0xffd700);
+        p.mesh.material.emissive.setHex(0xffd700);
+      } else if (bothCohere) {
+        p.mesh.material.color.setHex(0xffae00);
+        p.mesh.material.emissive.setHex(0xffae00);
+      }
+
       // Brighter particles during active communication — emissive glow
       p.mesh.material.opacity = (0.6 + 0.4 * wave + commIntensity * 0.3) * connOpacity;
       p.mesh.material.emissiveIntensity = 1.5 + commIntensity * 3.0 + wave * 1.0;
-      // Scale up particles during inference burst
-      p.mesh.scale.setScalar(1 + commIntensity * 1.5);
+      // Scale by comm intensity + IPFS storage depth (packet size metaphor)
+      p.mesh.scale.setScalar((1 + commIntensity * 1.5) * storageFactor);
     });
   });
 
@@ -2442,11 +2457,17 @@ function renderAgentCards(agents) {
 
   if (!agents || agents.length === 0) return;
 
-  // Sort agents: online → idle → stale, hide >24h
+  // Sort agents: online → idle → stale; archive >1 week
   const DAY_MS = 86400000;
+  const WEEK_MS = DAY_MS * 7;
+  // Split into active (< 1 week) and archived (> 1 week)
+  const archivedAgents = agents.filter(a => {
+    const ls = a.lastSeen || a.registeredAt || 0;
+    return ls > 0 && (Date.now() - ls) >= WEEK_MS;
+  });
   agents = agents.filter(a => {
     const ls = a.lastSeen || a.registeredAt || 0;
-    return ls > 0 && (Date.now() - ls) < DAY_MS; // hide peers older than 1 day
+    return ls > 0 && (Date.now() - ls) < WEEK_MS;
   });
   agents.sort((a, b) => {
     const aAge = a.lastSeen ? (Date.now() - a.lastSeen) : 999999999;
@@ -2596,6 +2617,29 @@ function renderAgentCards(agents) {
     if (insertBefore) nodesList.insertBefore(node, insertBefore);
     else nodesList.appendChild(node);
   });
+
+  // Archived agents section (>1 week old, collapsed, dim)
+  const oldArchive = nodesList.querySelector('.archive-section');
+  if (oldArchive) oldArchive.remove();
+  if (archivedAgents.length > 0) {
+    const archiveSection = document.createElement('details');
+    archiveSection.className = 'archive-section';
+    archiveSection.style.cssText = 'opacity:0.4;margin-top:6px';
+    const archSum = document.createElement('summary');
+    archSum.style.cssText = 'font-size:7px;color:#444;letter-spacing:0.15em;text-transform:uppercase;padding:3px 8px;cursor:pointer';
+    archSum.textContent = `archive (${archivedAgents.length})`;
+    archiveSection.appendChild(archSum);
+    const archList = document.createElement('div');
+    archivedAgents.slice(0, 20).forEach(a => {
+      const row = document.createElement('div');
+      row.style.cssText = 'font-size:8px;color:#444;padding:1px 12px';
+      const age = a.lastSeen ? Math.floor((Date.now() - a.lastSeen) / DAY_MS) : '?';
+      row.textContent = `${a.agentName || a.peerId?.slice(0, 8) || '?'} — ${age}d ago`;
+      archList.appendChild(row);
+    });
+    archiveSection.appendChild(archList);
+    nodesList.appendChild(archiveSection);
+  }
 }
 
 // Track recent messages per agent peerId (ring buffer, max 10)

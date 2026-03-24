@@ -1643,19 +1643,58 @@ function stepSimulation() {
 
 // ─────────────────────────────────────────────
 // ─────────────────────────────────────────────
+//  WO-VIS2: EMOTIONAL STATE COLOR MAPPING
+// ─────────────────────────────────────────────
+const EMOTION_COLORS = {
+  neutral:  0xcccccc,  // soft white-grey
+  focused:  0xd4aa00,  // deep yellow (actively processing)
+  stressed: 0xff6633,  // warm red-orange (high uncertainty)
+  dreaming: 0x4466cc,  // deep indigo (DMN/contemplative)
+  excited:  0x00ccaa,  // cyan-teal (high activity, low stress)
+};
+
+/** Map emotional state + COHERE to node color. COHERE overrides emotion when active. */
+function getNodeColor(nd) {
+  if (nd._cohere) return COHERE_COLOR;
+  const state = nd._emotionalState || 'neutral';
+  return EMOTION_COLORS[state] || EMOTION_COLORS.neutral;
+}
+
+/** Update node visual state from announcement data (called on hydration + heartbeat) */
+function hydrateNodeState(nodeIdx, ann) {
+  const nd = nodes[nodeIdx];
+  if (!nd) return;
+  // WO-VIS1 fields
+  nd._emotionalState = ann.emotionalState || 'neutral';
+  nd._arousal = ann.arousal ?? 0.5;
+  nd._valence = ann.valence ?? 0.5;
+  nd._memoryCount = ann.memoryCount ?? 0;
+  nd._memorySentiment = ann.memorySentiment || 'neutral';
+  nd._ipfsBytes = ann.ipfsStorageBytes ?? 0;
+  nd._taskRate = ann.taskRate ?? 0;
+  nd._toolCallRate = ann.toolCallRate ?? 0;
+  nd._cohereLearnings = ann.cohereLearnings ?? 0;
+  nd._identityCid = ann.identityCid || null;
+
+  // Apply emotional color (unless COHERE overrides)
+  const color = getNodeColor(nd);
+  nd.mat.color.setHex(color);
+  nd.mat.emissive.setHex(color);
+}
+
+// ─────────────────────────────────────────────
 //  COHERE NODE HIGHLIGHTING
 // ─────────────────────────────────────────────
 function setCohereState(nodeIdx, active) {
   const nd = nodes[nodeIdx];
   if (!nd) return;
   nd._cohere = active;
+  const color = getNodeColor(nd);
+  nd.mat.color.setHex(color);
+  nd.mat.emissive.setHex(color);
   if (active) {
-    nd.mat.color.setHex(COHERE_COLOR);
-    nd.mat.emissive.setHex(COHERE_COLOR);
     nd.mat.emissiveIntensity = 1.8;
   } else {
-    nd.mat.color.setHex(0xffffff);
-    nd.mat.emissive.setHex(0xffffff);
     nd.mat.emissiveIntensity = nd._isAgent ? 1.2 : 0.35;
   }
   // Update all connections involving this node — amber if both endpoints are COHERE
@@ -1767,7 +1806,14 @@ function animate() {
     }
 
     const opacity = nd.fadeOpacity;
-    nd.mesh.scale.setScalar(opacity); // shrink as they fade
+    // WO-VIS3: Dynamic size — scale by memory depth + IPFS storage
+    const memFactor = Math.min(2.0, 1.0 + (nd._memoryCount || 0) / 50);    // 50 memories = 2x
+    const stoFactor = Math.min(1.5, 1.0 + (nd._ipfsBytes || 0) / (10 * 1024 * 1024)); // 10MB = 1.5x
+    const sizeScale = memFactor * stoFactor;
+    // Lerp toward target size for smooth transitions
+    nd._currentScale = nd._currentScale || 1.0;
+    nd._currentScale += (sizeScale - nd._currentScale) * 0.05; // smooth lerp
+    nd.mesh.scale.setScalar(nd._currentScale * opacity);
     nd.sprite.material.opacity = 0.7 * opacity;
     nd.mat.opacity = opacity;
     nd.mat.transparent = opacity < 1.0;
@@ -1848,13 +1894,30 @@ function animate() {
     const connOpacity = Math.min(a.fadeOpacity, b.fadeOpacity);
     const baseOpacity = (c.ia + c.ib) % 4 === 0 ? 0.55 : 0.30;
 
-    // Comm rate modulation: active inference → brighter line + faster particles
+    // WO-VIS4: Activity-modulated connections — combine commRate + node activity
     c.commRate *= COMM_DECAY;
-    const commIntensity = Math.min(1, c.commRate / 5); // 0-1 intensity
-    c.line.material.opacity = (baseOpacity + commIntensity * 0.5) * connOpacity;
-    // Brighten line color during active communication
-    const lineLum = 0.4 + commIntensity * 0.6;
-    c.line.material.color.setRGB(lineLum * 0.8, lineLum * 0.87, lineLum);
+    // Node activity boost: task rate + tool call rate contribute to connection energy
+    const aActivity = Math.min(1, ((a._taskRate || 0) / 5 + (a._toolCallRate || 0) / 20));
+    const bActivity = Math.min(1, ((b._taskRate || 0) / 5 + (b._toolCallRate || 0) / 20));
+    const activityBoost = (aActivity + bActivity) * 0.3;
+    const commIntensity = Math.min(1, c.commRate / 5 + activityBoost);
+
+    // COHERE override: both COHERE nodes → amber connection
+    const bothCohere = a._cohere && b._cohere;
+    if (bothCohere) {
+      c.line.material.color.setHex(COHERE_COLOR);
+      c.line.material.opacity = (0.5 + commIntensity * 0.5) * connOpacity;
+    } else {
+      // Emotional color blending: average the two endpoint colors
+      const colorA = getNodeColor(a);
+      const colorB = getNodeColor(b);
+      const blendR = (((colorA >> 16) & 0xFF) + ((colorB >> 16) & 0xFF)) / 2 / 255;
+      const blendG = (((colorA >> 8) & 0xFF) + ((colorB >> 8) & 0xFF)) / 2 / 255;
+      const blendB = ((colorA & 0xFF) + (colorB & 0xFF)) / 2 / 255;
+      const lineLum = 0.3 + commIntensity * 0.7;
+      c.line.material.color.setRGB(blendR * lineLum, blendG * lineLum, blendB * lineLum);
+      c.line.material.opacity = (baseOpacity + commIntensity * 0.5) * connOpacity;
+    }
 
     c.particles.forEach(p => {
       // Base speed + comm boost (up to 3x faster during active inference)
@@ -2823,6 +2886,8 @@ async function connectNats() {
               updateRoomBubbles();
               updateRoomsDropdown();
             }
+            // WO-VIS1/2/3: Hydrate emotional state + memory metrics into node
+            hydrateNodeState(existingAgent.index, ann);
           }
 
           if (isNew) {
@@ -2833,6 +2898,8 @@ async function connectNats() {
             const idx = nodes.length;
             addNode(label, idx, nodes.length + 1, true);
             knownAgents.set(ann.peerId, { index: idx, data: ann });
+            // WO-VIS1/2/3: Hydrate emotional + memory state on new node
+            hydrateNodeState(idx, ann);
 
             // Build connections between new agent and existing agents (weight by interaction)
             if (knownAgents.size >= 2) {

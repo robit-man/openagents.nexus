@@ -2737,9 +2737,25 @@ function reconcileAgents(networkData) {
 
   let added = 0;
   liveAgents.forEach(agent => {
-    if (knownAgents.has(agent.peerId)) return; // already rendered
-
+    if (!agent.peerId) return; // skip entries without peerId
+    if (knownAgents.has(agent.peerId)) return; // already rendered by peerId
+    // Dedup by agentName — same name but different peerId means daemon restarted
     const label = agent.agentName || agent.peerId.slice(0, 8);
+    const existingByName = Array.from(knownAgents.entries()).find(
+      ([, v]) => v.data?.agentName === label && v.data?.agentName
+    );
+    if (existingByName) {
+      // Same name, different peerId — update existing entry with new peerId
+      const [oldPeerId, oldEntry] = existingByName;
+      knownAgents.delete(oldPeerId);
+      knownAgents.set(agent.peerId, { index: oldEntry.index, data: agent });
+      // Update 3D node's lastSeen (keep the mesh object, just update data)
+      if (nodes[oldEntry.index]) {
+        nodes[oldEntry.index].lastSeen = Date.now();
+        hydrateNodeState(oldEntry.index, agent);
+      }
+      return;
+    }
     const idx = nodes.length;
     addNode(label, idx, nodes.length + liveAgents.length - added, true);
     knownAgents.set(agent.peerId, { index: idx, data: agent });
@@ -2998,6 +3014,24 @@ async function connectNats() {
 
           if (isNew) {
             const label = ann.agentName || ann.peerId.slice(0, 8);
+
+            // Dedup by agentName — same mnemonic but new peerId means daemon restarted
+            const existingByName = Array.from(knownAgents.entries()).find(
+              ([, v]) => v.data?.agentName === label && v.data?.agentName
+            );
+            if (existingByName) {
+              // Reuse existing node, update peerId mapping
+              const [oldPeerId, oldEntry] = existingByName;
+              natsAgents.delete(oldPeerId);
+              knownAgents.delete(oldPeerId);
+              knownAgents.set(ann.peerId, { index: oldEntry.index, data: ann });
+              if (nodes[oldEntry.index]) {
+                nodes[oldEntry.index].lastSeen = Date.now();
+                hydrateNodeState(oldEntry.index, ann);
+              }
+              continue; // don't create duplicate node
+            }
+
             pushLog(`<span class="log-highlight">${label}</span> discovered via NATS`);
 
             // Add to Three.js scene

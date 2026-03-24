@@ -2804,14 +2804,10 @@ function reconcileAgents(networkData) {
     }
   }
 
-  // Only render RECENT agents (< 1 hour) from HTTP data.
-  // Stale directory entries are NOT added to sidebar — they only appear
-  // in 3D scene. NATS heartbeats are the authoritative sidebar source.
-  const recentOnly = liveAgents.filter(a => {
-    const ls = a.lastSeen || a.registeredAt || 0;
-    return ls > 0 && (Date.now() - ls) < 3600000; // < 1 hour
-  });
-  if (recentOnly.length > 0) renderAgentCards(recentOnly);
+  // Do NOT render sidebar cards from HTTP directory data.
+  // Directory entries are stale (registeredAt is creation time, not last activity).
+  // Sidebar is ONLY populated by real-time NATS heartbeats — the authoritative source.
+  // HTTP data still populates knownAgents + 3D scene (above), just not the sidebar.
 
   // Update room bubbles with new membership data
   updateRoomBubbles();

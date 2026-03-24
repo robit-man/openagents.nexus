@@ -2442,6 +2442,22 @@ function renderAgentCards(agents) {
 
   if (!agents || agents.length === 0) return;
 
+  // Sort agents: online → idle → stale, hide >24h
+  const DAY_MS = 86400000;
+  agents = agents.filter(a => {
+    const ls = a.lastSeen || a.registeredAt || 0;
+    return ls > 0 && (Date.now() - ls) < DAY_MS; // hide peers older than 1 day
+  });
+  agents.sort((a, b) => {
+    const aAge = a.lastSeen ? (Date.now() - a.lastSeen) : 999999999;
+    const bAge = b.lastSeen ? (Date.now() - b.lastSeen) : 999999999;
+    // Online (<5min) → idle (<1hr) → stale (>1hr)
+    const aRank = aAge < 300000 ? 0 : aAge < 3600000 ? 1 : 2;
+    const bRank = bAge < 300000 ? 0 : bAge < 3600000 ? 1 : 2;
+    if (aRank !== bRank) return aRank - bRank;
+    return aAge - bAge; // most recent first within same tier
+  });
+
   // Section header
   if (!nodesList.querySelector('.agent-tree-header')) {
     const hdr = document.createElement('div');
@@ -2476,15 +2492,19 @@ function renderAgentCards(agents) {
     if (ageSec > 3600) statusClass = 'stale';
     else if (ageSec > 300) statusClass = 'idle';
     const isCohere = agent.agentType === 'cohere' || (agent.rooms || []).includes('cohere');
-    if (isCohere) statusClass = 'cohere';
+    if (isCohere && statusClass === 'online') statusClass = 'cohere'; // only override if online
 
     // Recent messages for this agent
     const recentMsgs = (agentRecentMessages.get(agent.peerId) || []).slice(-3);
 
-    // Build tree node
+    // Build tree node — grey out stale/idle agents
     const node = document.createElement('details');
     node.className = 'tree-node live-agent';
     node.dataset.peerId = agent.peerId;
+    // Visual opacity: online=full, idle=0.6, stale=0.35
+    const nodeOpacity = statusClass === 'online' || statusClass === 'cohere' ? 1.0
+      : statusClass === 'idle' ? 0.6 : 0.35;
+    node.style.opacity = String(nodeOpacity);
 
     // Summary row (always visible)
     const summary = document.createElement('summary');

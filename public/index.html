@@ -2907,18 +2907,20 @@ async function loadDirectory() {
 
     pushLog(`Directory: <span class="log-highlight">${agents.length}</span> persisted agent${agents.length !== 1 ? 's' : ''}`);
 
-    // Hydrate scene + sidebar from KV snapshot (before NATS connects)
+    // Hydrate scene from KV snapshot — ONLY agents with a proper timestamp.
+    // Stale KV entries without timestamp are rejected completely.
     agents.forEach(agent => {
+      if (!agent.peerId) return;
+      if (typeof agent.timestamp !== 'number' || agent.timestamp <= 0) return; // NO TIMESTAMP = NO ENTRY
       if (knownAgents.has(agent.peerId)) return;
 
       const label = agent.agentName || agent.peerId.slice(0, 8);
       const idx = nodes.length;
       const nd = addNode(label, idx, nodes.length + agents.length, true);
-      // Use KV lastSeen if available, otherwise current time
-      nd.lastSeen = agent.lastSeen || agent.updatedAt || Date.now();
+      nd.lastSeen = agent.timestamp;
       knownAgents.set(agent.peerId, { index: idx, data: agent });
 
-      // Sidebar card
+      // Sidebar card only for agents with timestamp
       renderNatsAgentCard(agent);
     });
 

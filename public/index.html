@@ -2549,6 +2549,40 @@ function renderAgentCards(agents) {
       (tps ? `<div class="tree-row"><span class="tree-key">speed</span><span class="tree-val">${escHtml(tps)}</span></div>` : '') +
       (price ? `<div class="tree-row"><span class="tree-key">price</span><span class="tree-val" style="color:#ffae00">${escHtml(typeof price === 'object' ? (price.description || JSON.stringify(price)) : String(price))}</span></div>` : '');
 
+    // IPFS + Memory state (from WO-VIS1 enriched announcements)
+    const memCount = agent.memoryCount ?? 0;
+    const ipfsBytes = agent.ipfsStorageBytes ?? 0;
+    const emotState = agent.emotionalState || '';
+    const memSentiment = agent.memorySentiment || '';
+    const taskRt = agent.taskRate ?? 0;
+    const idCid = agent.identityCid || '';
+
+    if (memCount > 0 || ipfsBytes > 0 || emotState || idCid) {
+      const storageSection = document.createElement('div');
+      storageSection.style.cssText = 'margin-top:3px;padding-top:3px;border-top:1px solid rgba(255,255,255,0.05)';
+      let storageHtml = '';
+      if (emotState) {
+        const emotColors = { neutral: '#ccc', focused: '#d4aa00', stressed: '#ff6633', dreaming: '#4466cc', excited: '#00ccaa' };
+        storageHtml += `<div class="tree-row"><span class="tree-key">state</span><span class="tree-val" style="color:${emotColors[emotState] || '#ccc'}">${escHtml(emotState)}</span></div>`;
+      }
+      if (memCount > 0) {
+        storageHtml += `<div class="tree-row"><span class="tree-key">memories</span><span class="tree-val">${memCount}${memSentiment ? ' (' + memSentiment + ')' : ''}</span></div>`;
+      }
+      if (ipfsBytes > 0) {
+        const sizeStr = ipfsBytes < 1024 ? ipfsBytes + 'B' : ipfsBytes < 1048576 ? (ipfsBytes/1024).toFixed(1) + 'KB' : (ipfsBytes/1048576).toFixed(1) + 'MB';
+        storageHtml += `<div class="tree-row"><span class="tree-key">ipfs</span><span class="tree-val">${sizeStr}</span></div>`;
+      }
+      if (idCid) {
+        const shortCid = idCid.length > 16 ? idCid.slice(0, 8) + '...' + idCid.slice(-6) : idCid;
+        storageHtml += `<div class="tree-row"><span class="tree-key">identity</span><span class="tree-val" style="color:#ffd700" title="${escHtml(idCid)}">${escHtml(shortCid)}</span></div>`;
+      }
+      if (taskRt > 0) {
+        storageHtml += `<div class="tree-row"><span class="tree-key">tasks/hr</span><span class="tree-val">${taskRt.toFixed(1)}</span></div>`;
+      }
+      storageSection.innerHTML = storageHtml;
+      children.appendChild(storageSection);
+    }
+
     // Identity kernel status for COHERE-participating nodes
     if (isCohere) {
       const ik = agent.identityKernel || agent.ik || {};

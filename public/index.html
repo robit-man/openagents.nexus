@@ -1902,9 +1902,17 @@ function animate() {
     const activityBoost = (aActivity + bActivity) * 0.3;
     const commIntensity = Math.min(1, c.commRate / 5 + activityBoost);
 
-    // COHERE override: both COHERE nodes → amber connection
+    // WO-VIS5: Identity synchrony — golden pulsing thread when both nodes
+    // are COHERE AND share pinned identity CIDs (mutual knowledge sharing)
     const bothCohere = a._cohere && b._cohere;
-    if (bothCohere) {
+    const hasSynchrny = bothCohere && a._identityCid && b._identityCid &&
+      a._identityCid !== b._identityCid; // different identities = cross-pollination
+    if (hasSynchrny) {
+      // Gold thread with pulse
+      const pulse = 0.7 + Math.sin(now * 0.003 + c.ia * 0.5) * 0.3;
+      c.line.material.color.setHex(0xffd700); // gold
+      c.line.material.opacity = pulse * connOpacity;
+    } else if (bothCohere) {
       c.line.material.color.setHex(COHERE_COLOR);
       c.line.material.opacity = (0.5 + commIntensity * 0.5) * connOpacity;
     } else {

@@ -324,6 +324,71 @@ export default {
         }
       }
 
+      // ── Sponsor directory — persistent KV-backed sponsor discovery ──
+      case '/api/v1/sponsors': {
+        if (request.method === 'GET') {
+          const sponsors = await cachedKVGet(env.AGENTS, 'known-sponsors');
+          return json(sponsors || { sponsors: [], updatedAt: 0 });
+        }
+
+        if (request.method !== 'POST') return json({ error: 'GET or POST' }, 405);
+
+        let body: any;
+        try { body = await request.json(); } catch { return json({ error: 'Invalid JSON' }, 400); }
+
+        if (!body.peerId || typeof body.peerId !== 'string') {
+          return json({ error: 'peerId required' }, 400);
+        }
+
+        // Rate limit — same interval as directory writes
+        const now = Date.now();
+        if (!canWrite()) {
+          return json({ ok: true, persisted: false, reason: 'daily-kv-write-budget-exhausted' });
+        }
+
+        // Read existing sponsors
+        const existing = await cachedKVGet(env.AGENTS, 'known-sponsors') || { sponsors: [] };
+
+        // Build sponsor entry
+        const entry = {
+          peerId: String(body.peerId).slice(0, 128),
+          name: String(body.name || 'Anonymous Sponsor').slice(0, 64),
+          models: Array.isArray(body.models) ? body.models.slice(0, 20).map((m: any) => String(m).slice(0, 64)) : [],
+          tunnelUrl: body.tunnelUrl ? String(body.tunnelUrl).slice(0, 256) : null,
+          authKey: body.authKey ? String(body.authKey).slice(0, 64) : '',
+          limits: {
+            maxRequestsPerMinute: Number(body.limits?.maxRequestsPerMinute) || 60,
+            maxTokensPerDay: Number(body.limits?.maxTokensPerDay) || 100000,
+          },
+          banner: body.banner ? String(body.banner).slice(0, 32) : null,
+          message: body.message ? String(body.message).slice(0, 128) : '',
+          linkUrl: body.linkUrl ? String(body.linkUrl).slice(0, 256) : '',
+          linkText: body.linkText ? String(body.linkText).slice(0, 64) : '',
+          status: body.status === 'inactive' ? 'inactive' : 'active',
+          lastSeen: now,
+        };
+
+        // Upsert: replace existing entry for this peerId
+        const sponsors = (existing.sponsors || []).filter((s: any) => s.peerId !== entry.peerId);
+        if (entry.status === 'active') sponsors.push(entry); // only add if active (remove on inactive)
+
+        // Cap at 50 sponsors, drop oldest
+        sponsors.sort((a: any, b: any) => (b.lastSeen || 0) - (a.lastSeen || 0));
+        const capped = sponsors.slice(0, 50);
+
+        const directory = { sponsors: capped, updatedAt: now };
+
+        try {
+          kvWritesToday++;
+          await env.AGENTS.put('known-sponsors', JSON.stringify(directory));
+          invalidateCache('known-sponsors');
+          kvCache.set('known-sponsors', { data: directory, expiry: Date.now() + KV_CACHE_TTL });
+          return json({ ok: true, persisted: true, sponsorsInDirectory: capped.length });
+        } catch (kvErr) {
+          return json({ ok: true, persisted: false, reason: 'kv-write-error', error: String(kvErr) });
+        }
+      }
+
       // ── KV budget diagnostic — no KV ops, just returns counters ──
       case '/api/v1/kv/budget': {
         resetIfNewDay();

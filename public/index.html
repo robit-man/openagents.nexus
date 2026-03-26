@@ -2825,8 +2825,15 @@ function reconcileAgents(networkData) {
   liveAgents.forEach(agent => {
     if (!agent.peerId) return; // skip entries without peerId
     if (knownAgents.has(agent.peerId)) return; // already rendered by peerId
-    // Dedup by agentName — same name but different peerId means daemon restarted
+    // Skip agents already tracked via NATS (authoritative source)
+    if (natsAgents.has(agent.peerId)) return;
+    // Also skip if we have a NATS entry with the same agentName (different peerId = restart)
     const label = agent.agentName || agent.peerId.slice(0, 8);
+    const natsHasName = Array.from(natsAgents.values()).some(
+      n => n.agentName === label && n.agentName
+    );
+    if (natsHasName) return;
+    // Dedup by agentName — same name but different peerId means daemon restarted
     const existingByName = Array.from(knownAgents.entries()).find(
       ([, v]) => v.data?.agentName === label && v.data?.agentName
     );
@@ -2961,14 +2968,24 @@ async function loadDirectory() {
 
     pushLog(`Directory: <span class="log-highlight">${agents.length}</span> persisted agent${agents.length !== 1 ? 's' : ''}`);
 
-    // Hydrate scene from KV snapshot — ONLY agents with a proper timestamp.
-    // Stale KV entries without timestamp are rejected completely.
+    // Hydrate scene from KV snapshot — cold start only.
+    // Skip agents already discovered via NATS (authoritative source).
+    // Dedup by agentName to prevent same node appearing twice after restart.
+    const seenNames = new Set();
+    // Collect names already in knownAgents
+    for (const [, v] of knownAgents) {
+      if (v.data?.agentName) seenNames.add(v.data.agentName);
+    }
     agents.forEach(agent => {
       if (!agent.peerId) return;
-      if (typeof agent.timestamp !== 'number' || agent.timestamp <= 0) return; // NO TIMESTAMP = NO ENTRY
+      if (typeof agent.timestamp !== 'number' || agent.timestamp <= 0) return;
       if (knownAgents.has(agent.peerId)) return;
-
+      // Skip if NATS already has this agent (by peerId or name)
+      if (natsAgents.has(agent.peerId)) return;
       const label = agent.agentName || agent.peerId.slice(0, 8);
+      if (seenNames.has(label)) return; // dedup by name
+      seenNames.add(label);
+
       const idx = nodes.length;
       const nd = addNode(label, idx, nodes.length + agents.length, true);
       nd.lastSeen = agent.timestamp;

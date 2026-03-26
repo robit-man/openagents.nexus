@@ -272,10 +272,13 @@ export default {
           rooms: Array.isArray(body.rooms) ? body.rooms.slice(0, 10).map((r: any) => String(r).slice(0, 64)) : [],
           nknAddress: body.nknAddress ? String(body.nknAddress).slice(0, 256) : undefined,
           lastSeen: now,
+          timestamp: now,
         };
 
-        // Upsert: replace existing entry for this peerId or add new
-        const agents = (existing.agents || []).filter((a: any) => a.peerId !== entry.peerId);
+        // Upsert: replace existing entry for this peerId OR same agentName (daemon restart = new peerId)
+        const agents = (existing.agents || []).filter((a: any) =>
+          a.peerId !== entry.peerId && a.agentName !== entry.agentName
+        );
         agents.push(entry);
 
         // Cap at 100 agents, drop oldest
@@ -303,6 +306,7 @@ export default {
               agentName: a.agentName,
               rooms: a.rooms,
               nknAddress: a.nknAddress,
+              timestamp: a.timestamp || a.lastSeen || 0,
             })),
             updatedAt: now,
           },

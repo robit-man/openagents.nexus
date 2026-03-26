@@ -372,8 +372,11 @@ export default {
           lastSeen: now,
         };
 
-        // Upsert: replace existing entry for this peerId
-        const sponsors = (existing.sponsors || []).filter((s: any) => s.peerId !== entry.peerId);
+        // Upsert: replace existing entry matching peerId OR name (same sponsor
+        // with new tunnel URL after restart should replace, not duplicate)
+        const sponsors = (existing.sponsors || []).filter((s: any) =>
+          s.peerId !== entry.peerId && s.name !== entry.name
+        );
         if (entry.status === 'active') sponsors.push(entry); // only add if active (remove on inactive)
 
         // Cap at 50 sponsors, drop oldest

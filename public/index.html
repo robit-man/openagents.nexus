@@ -3177,7 +3177,14 @@ async function connectNats() {
           natsAgents.set(ann.peerId, { ...ann, lastSeen: Date.now() });
 
           // Refresh lastSeen + merge updated rooms/capabilities on heartbeat
-          const existingAgent = knownAgents.get(ann.peerId);
+          // Check by peerId first, then fall back to agentName match (handles
+          // KV peerId=mnemonic vs NATS peerId=12D3KooW for the same agent)
+          let existingAgent = knownAgents.get(ann.peerId);
+          if (!existingAgent && ann.agentName) {
+            for (const [, v] of knownAgents) {
+              if (v.data?.agentName === ann.agentName) { existingAgent = v; break; }
+            }
+          }
           if (existingAgent && nodes[existingAgent.index]) {
             nodes[existingAgent.index].lastSeen = Date.now();
             // Merge updated announcement data (rooms, capabilities, etc.)

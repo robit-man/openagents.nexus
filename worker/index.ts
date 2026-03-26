@@ -354,8 +354,12 @@ export default {
         const existing = await cachedKVGet(env.AGENTS, 'known-sponsors') || { sponsors: [] };
 
         // Build sponsor entry
+        // libp2pPeerId is the stable identity (derived from ~/.open-agents/identity.key).
+        // peerId and tunnelUrl may rotate (cloudflare tunnel URLs change on restart).
+        const libp2pPeerId = body.libp2pPeerId ? String(body.libp2pPeerId).slice(0, 128) : '';
         const entry = {
           peerId: String(body.peerId).slice(0, 128),
+          libp2pPeerId,
           name: String(body.name || 'Anonymous Sponsor').slice(0, 64),
           models: Array.isArray(body.models) ? body.models.slice(0, 20).map((m: any) => String(m).slice(0, 64)) : [],
           tunnelUrl: body.tunnelUrl ? String(body.tunnelUrl).slice(0, 256) : null,
@@ -372,11 +376,16 @@ export default {
           lastSeen: now,
         };
 
-        // Upsert: replace existing entry matching peerId OR name (same sponsor
-        // with new tunnel URL after restart should replace, not duplicate)
-        const sponsors = (existing.sponsors || []).filter((s: any) =>
-          s.peerId !== entry.peerId && s.name !== entry.name
-        );
+        // Upsert: dedup priority order:
+        // 1. libp2pPeerId match (stable identity — same machine, different tunnel URLs)
+        // 2. name match (same sponsor name — catches restarts without libp2p)
+        // 3. peerId match (legacy — tunnel URL as peerId)
+        const sponsors = (existing.sponsors || []).filter((s: any) => {
+          if (libp2pPeerId && s.libp2pPeerId === libp2pPeerId) return false; // same node
+          if (s.name === entry.name) return false; // same sponsor name
+          if (s.peerId === entry.peerId) return false; // same peerId
+          return true;
+        });
         if (entry.status === 'active') sponsors.push(entry); // only add if active (remove on inactive)
 
         // Cap at 50 sponsors, drop oldest

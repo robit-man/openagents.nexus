@@ -2688,18 +2688,31 @@ async function loadDirectory() {
 
     pushLog(\`Directory: <span class="log-highlight">\${agents.length}</span> persisted agent\${agents.length !== 1 ? 's' : ''}\`);
 
-    // Hydrate scene + sidebar from KV snapshot (before NATS connects)
+    // Hydrate scene from KV — NATS is authoritative, never overwrite live data.
+    // Dedup by agentName AND peerId (KV=mnemonic, NATS=12D3KooW).
+    const seenNames = new Set();
+    const seenPeerIds = new Set();
+    for (const [pid, v] of knownAgents) {
+      seenPeerIds.add(pid);
+      if (v.data?.agentName) seenNames.add(v.data.agentName);
+    }
+    for (const [pid, v] of natsAgents) {
+      seenPeerIds.add(pid);
+      if (v.agentName) seenNames.add(v.agentName);
+    }
     agents.forEach(agent => {
-      if (knownAgents.has(agent.peerId)) return;
-
+      if (!agent.peerId) return;
+      if (seenPeerIds.has(agent.peerId)) return;
       const label = agent.agentName || agent.peerId.slice(0, 8);
+      if (seenNames.has(label)) return;
+      seenNames.add(label);
+      seenPeerIds.add(agent.peerId);
+
       const idx = nodes.length;
       const nd = addNode(label, idx, nodes.length + agents.length, true);
-      // Use KV lastSeen if available, otherwise current time
       nd.lastSeen = agent.lastSeen || agent.updatedAt || Date.now();
       knownAgents.set(agent.peerId, { index: idx, data: agent });
 
-      // Sidebar card
       renderNatsAgentCard(agent);
     });
 

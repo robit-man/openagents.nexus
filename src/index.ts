@@ -1519,8 +1519,12 @@ export { NatsDiscovery, DEFAULT_NATS_CONFIG, NATS_DISCOVERY_SERVERS, NATS_DISCOV
 export type { NatsDiscoveryConfig, NatsAgentAnnouncement } from './nats/index.js';
 
 // NKN fallback addressing
-export { NknFallback, DEFAULT_NKN_CONFIG } from './nkn/index.js';
-export type { NknConfig, NknAddressInfo } from './nkn/index.js';
+export {
+  NknFallback, DEFAULT_NKN_CONFIG,
+  computeNknSharedSecret, signNknMessage, verifyNknMessage,
+  buildNknEnvelope, parseNknEnvelope, deriveNknSeed,
+} from './nkn/index.js';
+export type { NknConfig, NknAddressInfo, NknPeerEntry, NknInboxMessage } from './nkn/index.js';
 
 // Room member tracking
 export type { RoomMember } from './chat/index.js';

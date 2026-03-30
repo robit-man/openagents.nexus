@@ -88,7 +88,31 @@ export class NatsDiscovery {
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const nats = await import('nats.ws');
+        // NX-08: Use native NATS TCP client in Node.js to avoid WebSocket conflict
+        // with libp2p's @libp2p/websockets. Fall back to nats.ws for browser.
+        let nats: any;
+        const isNode = typeof globalThis.process !== 'undefined' && globalThis.process.versions?.node;
+        if (isNode) {
+          try {
+            nats = await import('nats');
+            // Use TCP servers (port 4222) instead of WS (port 8443)
+            const tcpServers = this.config.servers.map(s =>
+              s.replace('wss://', 'nats://').replace(':8443', ':4222'));
+            this.nc = await nats.connect({
+              servers: tcpServers.length > 0 ? tcpServers : ['nats://demo.nats.io:4222'],
+              timeout: 5000,
+              reconnect: true,
+              maxReconnectAttempts: 5,
+            });
+            log.info(`Connected to NATS (TCP): ${tcpServers.join(', ')}`);
+            return true;
+          } catch {
+            // TCP failed — fall through to WS
+            nats = await import('nats.ws');
+          }
+        } else {
+          nats = await import('nats.ws');
+        }
         this.nc = await nats.connect({
           servers: this.config.servers,
           timeout: 5000,

@@ -597,8 +597,8 @@ export const INDEX_HTML = `<!DOCTYPE html>
 <!-- COHERE MESHNET CHAT WIDGET -->
 <div id="cohere-chat" class="cohere-chat-collapsed">
   <div id="cohere-chat-header" class="cohere-chat-header">
-    <span style="color:#ffae00;font-weight:bold">⬡</span>
-    <span style="font-size:10px;color:#aaa;margin-left:6px">COHERE Meshnet</span>
+    <span style="color:#b2920a;font-weight:bold">⬡</span>
+    <span style="font-size:10px;color:#b0b0b0;margin-left:6px">COHERE Meshnet</span>
     <span id="cohere-chat-status" style="font-size:8px;color:#555;margin-left:auto">click to chat</span>
   </div>
   <div id="cohere-chat-body" class="cohere-chat-body">
@@ -618,14 +618,15 @@ export const INDEX_HTML = `<!DOCTYPE html>
     transform: translateX(-50%);
     width: 360px;
     z-index: 200;
-    border: 1px solid rgba(255,174,0,0.3);
-    border-radius: 12px;
-    background: linear-gradient(135deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98));
+    border: 1px solid rgba(178,146,10,0.3);
+    border-radius: 8px;
+    background: #1a1a1e;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     overflow: hidden;
     transition: all 0.3s ease;
     cursor: pointer;
+    font-family: 'SF Mono','Cascadia Code','Fira Code',monospace;
   }
   .cohere-chat-expanded {
     position: fixed;
@@ -635,21 +636,23 @@ export const INDEX_HTML = `<!DOCTYPE html>
     width: min(500px, 90vw);
     height: min(50vh, 400px);
     z-index: 200;
-    border: 1px solid rgba(255,174,0,0.4);
-    border-radius: 12px;
-    background: linear-gradient(135deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98));
+    border: 1px solid rgba(178,146,10,0.4);
+    border-radius: 8px;
+    background: #1a1a1e;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     overflow: hidden;
     transition: all 0.3s ease;
     display: flex;
     flex-direction: column;
+    font-family: 'SF Mono','Cascadia Code','Fira Code',monospace;
   }
   .cohere-chat-header {
     padding: 10px 14px;
     display: flex;
     align-items: center;
-    border-bottom: 1px solid rgba(255,174,0,0.15);
+    background: #1e1e22;
+    border-bottom: 1px solid #2a2a30;
     flex-shrink: 0;
   }
   .cohere-chat-collapsed .cohere-chat-body { display: none; }
@@ -664,21 +667,22 @@ export const INDEX_HTML = `<!DOCTYPE html>
     overflow-y: auto;
     padding: 12px 14px;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255,174,0,0.3) transparent;
+    scrollbar-color: rgba(178,146,10,0.3) transparent;
   }
   .cohere-chat-messages::-webkit-scrollbar { width: 4px; }
-  .cohere-chat-messages::-webkit-scrollbar-thumb { background: rgba(255,174,0,0.3); border-radius: 2px; }
+  .cohere-chat-messages::-webkit-scrollbar-thumb { background: rgba(178,146,10,0.3); border-radius: 2px; }
   .cohere-msg {
     margin-bottom: 10px;
     line-height: 1.5;
     font-size: 11px;
+    color: #b0b0b0;
   }
   .cohere-msg-user {
     color: #fff;
     text-align: right;
   }
   .cohere-msg-user span {
-    background: rgba(255,174,0,0.2);
+    background: rgba(178,146,10,0.15);
     padding: 6px 10px;
     border-radius: 10px 10px 2px 10px;
     display: inline-block;
@@ -3449,6 +3453,119 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     }
   }
 
+  // ── Sponsor-routed inference ──────────────────────────────────────
+  // Queries sponsors from KV directory, picks one with preferred models,
+  // streams response via the sponsor's tunnel URL (/v1/chat/completions).
+  let _cachedSponsors = null;
+  let _sponsorCacheTs = 0;
+
+  async function fetchSponsors() {
+    // Cache for 60s
+    if (_cachedSponsors && Date.now() - _sponsorCacheTs < 60000) return _cachedSponsors;
+    try {
+      const resp = await fetch('/api/v1/sponsors', { signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      _cachedSponsors = (data.sponsors || []).filter(s => s.status === 'active' && s.tunnelUrl);
+      _sponsorCacheTs = Date.now();
+      return _cachedSponsors;
+    } catch { return []; }
+  }
+
+  function pickBestSponsor(sponsors) {
+    if (!sponsors.length) return null;
+    // Score each sponsor — prefer qwen3.5/open-agents- models
+    let best = null, bestScore = -1;
+    for (const sp of sponsors) {
+      let score = 1;
+      const models = sp.models || [];
+      const hasQwen35 = models.some(m => /qwen3\\.5/i.test(m));
+      const hasOA = models.some(m => /^open-agents-/i.test(m));
+      if (hasQwen35) score += 10;
+      if (hasOA) score += 5;
+      score += Math.min(models.length, 10); // more models = better
+      if (score > bestScore) { bestScore = score; best = sp; }
+    }
+    return best;
+  }
+
+  function pickModel(sponsor) {
+    const models = sponsor.models || [];
+    // Prefer open-agents-qwen35 variants (expanded context)
+    const oaQwen = models.find(m => /^open-agents-qwen35/i.test(m));
+    if (oaQwen) return oaQwen;
+    // Then any qwen3.5
+    const qwen = models.find(m => /qwen3\\.5/i.test(m));
+    if (qwen) return qwen;
+    // Then largest model by name heuristic
+    return models[0] || 'qwen3.5:9b';
+  }
+
+  async function resolveViaSponsor() {
+    const sponsors = await fetchSponsors();
+    const sponsor = pickBestSponsor(sponsors);
+    if (!sponsor) throw new Error('No sponsors available');
+
+    const model = pickModel(sponsor);
+    const baseUrl = sponsor.tunnelUrl.replace(/\\/+$/, '');
+    const headers = { 'Content-Type': 'application/json' };
+    if (sponsor.authKey) headers['Authorization'] = 'Bearer ' + sponsor.authKey;
+
+    const resp = await fetch(baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: conversationHistory.slice(-10),
+        stream: true,
+        max_tokens: 4096,
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+
+    if (!resp.ok) throw new Error('Sponsor returned ' + resp.status);
+
+    removeTypingIndicator();
+    const responseMsg = document.createElement('div');
+    responseMsg.className = 'cohere-msg cohere-msg-agent';
+    const responseSpan = document.createElement('span');
+    responseMsg.appendChild(responseSpan);
+    chatMsgs.appendChild(responseMsg);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split('\\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(data);
+          const token = obj.choices?.[0]?.delta?.content || '';
+          fullText += token;
+          responseSpan.textContent = fullText;
+          chatMsgs.scrollTop = chatMsgs.scrollHeight;
+        } catch {}
+      }
+    }
+
+    const sourceDiv = document.createElement('div');
+    sourceDiv.className = 'cohere-msg-source';
+    sourceDiv.textContent = 'via ' + (sponsor.name || 'sponsor') + ' (' + model.split(':')[0] + ')';
+    responseMsg.appendChild(sourceDiv);
+
+    if (fullText) {
+      conversationHistory.push({ role: 'assistant', content: fullText });
+      while (conversationHistory.length > 20) conversationHistory.splice(1, 1);
+    }
+    return sponsor.name;
+  }
+
   async function sendMessage() {
     const text = chatInput.value.trim();
     if (!text || isSending) return;
@@ -3458,69 +3575,57 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     chatSend.disabled = true;
     addMessage(text, 'user');
 
-    // Show typing indicator
     chatStatus.textContent = 'thinking...';
-    chatStatus.style.color = '#ffae00';
+    chatStatus.style.color = '#b2920a';
     addTypingIndicator();
 
-    // Add to conversation history
     conversationHistory.push({ role: 'user', content: text });
-
-    // Generate a query ID for meshnet correlation
     const queryId = 'q-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
-    // ── Local-first + meshnet broadcast ──────────────────────────────
-    // Strategy: try local Ollama immediately (fast, works when viewing locally),
-    // simultaneously broadcast to meshnet for distributed resolution.
-    // If local fails, wait briefly for meshnet response before giving up.
-    //
-    // Security: query routing is isolated from identity kernel.
-    // nexus.cohere.query carries ONLY the user query and queryId.
+    // ── Resolution: Sponsor first → NATS meshnet fallback ──────────
+    // The nexus frontend has NO local Ollama — all inference goes through
+    // sponsors (via tunnel URL) or NATS meshnet (P2P relay to OA nodes).
 
-    // Broadcast to meshnet in parallel (non-blocking, best-effort)
-    const meshnetSent = broadcastToMeshnet(text, queryId);
-    if (meshnetSent) {
-      pushLog('COHERE query broadcast to <span class="log-highlight">meshnet</span> (' + natsAgents.size + ' nodes)');
-    }
-
-    // Try local Ollama first (instant if available)
-    chatStatus.textContent = 'resolving...';
-    chatStatus.style.color = '#ffae00';
-
+    // 1. Try sponsor-routed inference (direct HTTPS to sponsor's OA gateway)
+    chatStatus.textContent = 'connecting to sponsor...';
     try {
-      await resolveViaLocalOllama();
-    } catch (err) {
-      const errMsg = err.message || 'unknown error';
-      const isNetworkErr = errMsg.includes('No Ollama') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError') || errMsg.includes('timeout');
-
-      if (isNetworkErr && meshnetSent && natsAgents.size > 0) {
-        // Local unavailable, meshnet query is out — wait for distributed response
-        chatStatus.textContent = 'awaiting meshnet (' + natsAgents.size + ' nodes)...';
-        chatStatus.style.color = '#4dabf7';
-        const meshTimeout = setTimeout(() => {
-          window._cohereMeshnetTimeout = null;
-          removeTypingIndicator();
-          addMessage('No local Ollama running here. Meshnet query sent to ' +
-            natsAgents.size + ' node(s) but none responded with inference. ' +
-            'Run \`oa\` locally with \`/cohere\` to enable distributed inference.', 'agent', 'info');
-          chatStatus.textContent = 'distributed mind';
-          chatStatus.style.color = '#555';
-          chatSend.disabled = false;
-          isSending = false;
-          chatInput.focus();
-        }, 10000);
-        window._cohereMeshnetTimeout = meshTimeout;
-        return;
-      } else if (isNetworkErr) {
-        removeTypingIndicator();
-        addMessage('No local Ollama detected. Install Ollama and run a model, or start \`oa\` with \`/cohere\` to join the meshnet.', 'agent', 'info');
-      } else {
-        removeTypingIndicator();
-        addMessage('Error: ' + errMsg, 'agent', 'error');
-      }
+      const sponsorName = await resolveViaSponsor();
+      pushLog('Resolved via sponsor <span class="log-highlight">' + sponsorName + '</span>');
+      chatStatus.textContent = sponsorName;
+      chatStatus.style.color = '#b2920a';
+      chatSend.disabled = false;
+      isSending = false;
+      chatInput.focus();
+      return;
+    } catch (sponsorErr) {
+      pushLog('Sponsor unavailable: ' + (sponsorErr.message || '').slice(0, 60));
     }
 
-    chatStatus.textContent = 'distributed mind';
+    // 2. Fall back to NATS meshnet broadcast
+    const meshnetSent = broadcastToMeshnet(text, queryId);
+    if (meshnetSent && natsAgents.size > 0) {
+      pushLog('Meshnet broadcast to ' + natsAgents.size + ' node(s)');
+      chatStatus.textContent = 'awaiting meshnet (' + natsAgents.size + ' nodes)...';
+      chatStatus.style.color = '#4dabf7';
+      const meshTimeout = setTimeout(() => {
+        window._cohereMeshnetTimeout = null;
+        removeTypingIndicator();
+        addMessage('No sponsors responded and meshnet query to ' +
+          natsAgents.size + ' node(s) timed out. Sponsors may be offline — try again shortly.', 'agent', 'info');
+        chatStatus.textContent = 'distributed mind';
+        chatStatus.style.color = '#555';
+        chatSend.disabled = false;
+        isSending = false;
+        chatInput.focus();
+      }, 15000);
+      window._cohereMeshnetTimeout = meshTimeout;
+      return;
+    }
+
+    // 3. No sponsors, no meshnet nodes — show helpful message
+    removeTypingIndicator();
+    addMessage('No inference sponsors online right now. Sponsors share their GPU power with the network — check back shortly or run \\`oa\\` with \\`/sponsor\\` to contribute.', 'agent', 'info');
+    chatStatus.textContent = 'waiting for sponsors';
     chatStatus.style.color = '#555';
     chatSend.disabled = false;
     isSending = false;
@@ -3534,7 +3639,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
 
   // Welcome message
   const nodeCount = natsAgents.size || knownAgents.size || 0;
-  addMessage('COHERE distributed mind — ' + (nodeCount > 0 ? nodeCount + ' node(s) online' : 'connecting...') + '. Queries route to meshnet first, local Ollama as fallback. Identity kernels are signed, IPFS-pinned, and read-only from the query path.', 'agent', 'system');
+  addMessage('COHERE distributed mind — ' + (nodeCount > 0 ? nodeCount + ' node(s) online' : 'connecting...') + '. Queries route through sponsored inference providers on the network.', 'agent', 'system');
 }
 </script>
 </body>

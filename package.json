@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "dev": "node --import tsx src/index.ts",
+    "prebuild": "rm -rf dist *.tsbuildinfo",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",

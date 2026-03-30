@@ -331,8 +331,23 @@ export default {
       // ── Sponsor directory — persistent KV-backed sponsor discovery ──
       case '/api/v1/sponsors': {
         if (request.method === 'GET') {
-          const sponsors = await cachedKVGet(env.AGENTS, 'known-sponsors');
-          return json(sponsors || { sponsors: [], updatedAt: 0 });
+          const raw = await cachedKVGet(env.AGENTS, 'known-sponsors') as any;
+          const allSponsors: any[] = raw?.sponsors || [];
+          const now = Date.now();
+          // NX-03: Evict stale sponsors — entries not seen in 15 min are hidden.
+          // Heartbeat (NX-01) re-POSTs every 5 min, so 15 min gives 3 missed beats.
+          const STALE_TTL = 15 * 60 * 1000; // 15 minutes
+          const active = allSponsors.filter((s: any) => {
+            const lastSeen = s.lastSeen || 0;
+            return (now - lastSeen) < STALE_TTL;
+          });
+          const staleCount = allSponsors.length - active.length;
+          return json({
+            sponsors: active,
+            updatedAt: raw?.updatedAt || 0,
+            total: allSponsors.length,
+            stale_count: staleCount,
+          });
         }
 
         if (request.method !== 'POST') return json({ error: 'GET or POST' }, 405);
@@ -380,7 +395,12 @@ export default {
         // 1. libp2pPeerId match (stable identity — same machine, different tunnel URLs)
         // 2. name match (same sponsor name — catches restarts without libp2p)
         // 3. peerId match (legacy — tunnel URL as peerId)
+        // NX-03: Lazy GC — remove entries older than 1 hour on every write
+        const GC_TTL = 60 * 60 * 1000; // 1 hour
         const sponsors = (existing.sponsors || []).filter((s: any) => {
+          // GC: evict entries that haven't heartbeated in 1 hour
+          if (s.lastSeen && (now - s.lastSeen) > GC_TTL) return false;
+          // Dedup: remove same-identity entries (upsert)
           if (libp2pPeerId && s.libp2pPeerId === libp2pPeerId) return false; // same node
           if (s.name === entry.name) return false; // same sponsor name
           if (s.peerId === entry.peerId) return false; // same peerId

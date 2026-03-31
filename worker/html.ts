@@ -3397,6 +3397,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
         type: 'cohere.query',
         queryId,
         query: text,
+        messages: conversationHistory.slice(-6), // CO-01: multi-turn context (last 3 exchanges)
         timestamp: Date.now(),
         source: 'nexus-frontend',
       };

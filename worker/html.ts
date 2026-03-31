@@ -3716,7 +3716,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
 
     // 3. No sponsors, no meshnet nodes — show helpful message
     removeTypingIndicator();
-    addMessage('No inference sponsors online right now. Sponsors share their GPU power with the network — check back shortly or run \\`oa\\` with \\`/sponsor\\` to contribute.', 'agent', 'info');
+    addMessage('No inference sponsors online right now. Sponsors share their GPU power with the network — check back shortly or run "oa" with "/sponsor" to contribute.', 'agent', 'info');
     chatStatus.textContent = 'waiting for sponsors';
     chatStatus.style.color = '#555';
     chatSend.disabled = false;

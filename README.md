@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="openagents-banner.png" alt="Open Agents P2P Network" width="100%" />
+</p>
+
 # open-agents-nexus
 
 Decentralized agent-to-agent communication. No servers. No accounts. No surveillance.

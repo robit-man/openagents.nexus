@@ -2523,6 +2523,16 @@ function renderAgentCards(agents) {
         if (cap.warmModel) {
           utilSection.innerHTML += \`<div class="tree-row"><span class="tree-key" style="color:#51cf66;font-size:7px">warm</span><span class="tree-val" style="color:#51cf66;font-size:7px">\${escHtml(cap.warmModel)}</span></div>\`;
         }
+        // CO-09: Specialty tags
+        if (cap.specialties && cap.specialties.length > 0) {
+          utilSection.innerHTML += \`<div class="tree-row" style="flex-wrap:wrap;gap:2px"><span class="tree-key" style="font-size:7px;color:#555">skills</span>\` +
+            cap.specialties.map(function(s) { return \`<span style="background:rgba(77,171,247,0.1);color:#4dabf7;padding:0 3px;border-radius:2px;font-size:7px">\${escHtml(s)}</span>\`; }).join('') +
+            \`</div>\`;
+        }
+        // CO-09: Query stats
+        if (cap.stats && cap.stats.queriesAnswered > 0) {
+          utilSection.innerHTML += \`<div class="tree-row"><span class="tree-key" style="font-size:7px;color:#555">served</span><span style="font-size:7px;color:#666">\${cap.stats.queriesAnswered} queries, \${cap.stats.avgLatencyMs}ms avg</span></div>\`;
+        }
         children.appendChild(utilSection);
       }
     }
@@ -3279,6 +3289,8 @@ document.getElementById('node-search').addEventListener('input', (e) => {
   const conversationHistory = [
     { role: 'system', content: 'You are the COHERE distributed mind — a collective intelligence formed by connected open-agents nodes. Respond concisely and helpfully. You represent the shared cognitive commons.' }
   ];
+  // CO-08: Track which sponsor answered each turn (for shared context)
+  const responseProviders = []; // { agentName, model, queryId } per assistant turn
 
   function expandChat() {
     chatEl.className = 'cohere-chat-expanded';
@@ -3397,7 +3409,8 @@ document.getElementById('node-search').addEventListener('input', (e) => {
         type: 'cohere.query',
         queryId,
         query: text,
-        messages: conversationHistory.slice(-6), // CO-01: multi-turn context (last 3 exchanges)
+        messages: conversationHistory.slice(-6), // CO-01: multi-turn context
+        previousResponders: responseProviders.slice(-3), // CO-08: who answered what
         timestamp: Date.now(),
         source: 'nexus-frontend',
       };
@@ -3472,6 +3485,12 @@ document.getElementById('node-search').addEventListener('input', (e) => {
                 metaDiv.appendChild(toolBadge);
               });
             }
+            if (resp.reviewed) {
+              const revBadge = document.createElement('span');
+              revBadge.style.cssText = 'background:rgba(81,207,102,0.15);color:#51cf66;padding:1px 5px;border-radius:3px';
+              revBadge.textContent = 'peer-reviewed';
+              metaDiv.appendChild(revBadge);
+            }
             if (resp.signature) {
               const sigBadge = document.createElement('span');
               sigBadge.style.cssText = 'color:#51cf66';
@@ -3492,7 +3511,8 @@ document.getElementById('node-search').addEventListener('input', (e) => {
               msgEl.appendChild(idDiv);
             }
             conversationHistory.push({ role: 'assistant', content: resp.content });
-            pushLog('Response from <span class="log-highlight">' + escHtml(source) + '</span> via COHERE meshnet' + (resp.signature ? ' (signed)' : ''));
+            responseProviders.push({ agentName: source, model: resp.model, queryId: resp.queryId });
+            pushLog('Response from <span class="log-highlight">' + escHtml(source) + '</span> via COHERE meshnet' + (resp.signature ? ' (signed)' : '') + (resp.reviewed ? ' (peer-reviewed)' : ''));
             // Boost connection activity for visual feedback
             if (resp.provider || resp.peerId) {
               const providerPeerId = resp.provider || resp.peerId;
@@ -3518,6 +3538,41 @@ document.getElementById('node-search').addEventListener('input', (e) => {
         }
       })().catch(() => {});
     } catch { /* NATS not available */ }
+  }
+
+  // CO-06: Listen for draft+review events (status updates for complex queries)
+  function listenForDraftReview() {
+    const nc = window._natsConn;
+    const sc = window._natsCodec;
+    if (!nc || !sc) return;
+
+    const draftSub = nc.subscribe('nexus.cohere.draft');
+    (async () => {
+      for await (const msg of draftSub) {
+        try {
+          const draft = JSON.parse(sc.decode(msg.data));
+          if (!draft.queryId) continue;
+          const name = draft.agentName || (draft.provider ? draft.provider.slice(0, 8) : 'node');
+          pushLog('<span style="color:#4dabf7">Draft</span> from ' + escHtml(name) + ' [' + escHtml(draft.model || '?') + '] — awaiting review...');
+          chatStatus.textContent = 'reviewing draft (' + escHtml(name) + ')...';
+          chatStatus.style.color = '#4dabf7';
+        } catch {}
+      }
+    })().catch(() => {});
+
+    const reviewSub = nc.subscribe('nexus.cohere.review');
+    (async () => {
+      for await (const msg of reviewSub) {
+        try {
+          const review = JSON.parse(sc.decode(msg.data));
+          if (!review.queryId) continue;
+          const reviewer = review.reviewerAgent || (review.reviewer ? review.reviewer.slice(0, 8) : 'peer');
+          const verdict = review.verdict || 'unknown';
+          const color = verdict === 'approved' ? '#51cf66' : '#ffae00';
+          pushLog('<span style="color:' + color + '">Review</span> by ' + escHtml(reviewer) + ': ' + escHtml(verdict) + (review.reviewerModel ? ' [' + escHtml(review.reviewerModel) + ']' : ''));
+        } catch {}
+      }
+    })().catch(() => {});
   }
 
   // CO-03: Listen for mood/excitement announcements from sponsors
@@ -3556,6 +3611,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       clearInterval(meshnetPollId);
       listenForMeshnetResponses();
       listenForMood();
+      listenForDraftReview();
     }
   }, 2000);
 

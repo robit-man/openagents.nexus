@@ -2488,6 +2488,45 @@ function renderAgentCards(agents) {
       children.appendChild(capsRow);
     }
 
+    // System utilization bars — from NATS capacity announcements
+    const cap = nodeCapacity.get(agent.peerId);
+    if (cap && (Date.now() - cap.lastSeen) < 120_000) {
+      const utilSection = document.createElement('div');
+      utilSection.style.cssText = 'margin-top:3px;padding-top:3px;border-top:1px solid rgba(255,255,255,0.04)';
+      const metrics = cap.systemMetrics || {};
+      const bars = [];
+      // GPU bar
+      if (typeof metrics.gpu === 'number') {
+        const gpuLabel = metrics.gpuName ? escHtml(metrics.gpuName) : 'GPU';
+        const vram = (metrics.vramUsed && metrics.vramTotal)
+          ? \` (\${(metrics.vramUsed / 1024).toFixed(1)}/\${(metrics.vramTotal / 1024).toFixed(1)}GB)\`
+          : '';
+        bars.push({ label: gpuLabel + vram, pct: metrics.gpu });
+      }
+      // CPU bar
+      if (typeof metrics.cpu === 'number') {
+        bars.push({ label: 'CPU', pct: metrics.cpu });
+      }
+      // RAM bar
+      if (typeof metrics.memory === 'number') {
+        bars.push({ label: 'RAM', pct: metrics.memory });
+      }
+      if (bars.length > 0) {
+        utilSection.innerHTML = bars.map(b => {
+          const color = b.pct < 50 ? '#51cf66' : b.pct < 80 ? '#fcc419' : '#ff6b6b';
+          return \`<div class="tree-row" style="flex-direction:column;gap:1px">
+            <div style="display:flex;justify-content:space-between;font-size:7px"><span style="color:#555">\${b.label}</span><span style="color:\${color}">\${b.pct.toFixed(0)}%</span></div>
+            <div style="height:3px;background:rgba(255,255,255,0.06);border-radius:1px;overflow:hidden"><div style="height:100%;width:\${Math.min(b.pct, 100)}%;background:\${color};border-radius:1px"></div></div>
+          </div>\`;
+        }).join('');
+        // Warm model indicator
+        if (cap.warmModel) {
+          utilSection.innerHTML += \`<div class="tree-row"><span class="tree-key" style="color:#51cf66;font-size:7px">warm</span><span class="tree-val" style="color:#51cf66;font-size:7px">\${escHtml(cap.warmModel)}</span></div>\`;
+        }
+        children.appendChild(utilSection);
+      }
+    }
+
     // Recent messages
     if (recentMsgs.length > 0) {
       const msgSection = document.createElement('div');
@@ -2599,8 +2638,18 @@ function reconcileAgents(networkData) {
     }
   }
 
+  // Merge NATS-fresh timestamps before rendering — KV lastSeen can be stale (up to 120s cache),
+  // so prefer the freshest value from NATS heartbeats / knownAgents to prevent dot downgrade.
+  const mergedAgents = liveAgents.map(agent => {
+    const kvLastSeen = agent.lastSeen || agent.registeredAt || 0;
+    const knownLastSeen = knownAgents.get(agent.peerId)?.data?.lastSeen || 0;
+    const natsLastSeen = natsAgents.get(agent.peerId)?.lastSeen || 0;
+    const freshest = Math.max(kvLastSeen, knownLastSeen, natsLastSeen);
+    return freshest > kvLastSeen ? { ...agent, lastSeen: freshest } : agent;
+  });
+
   // Render agent cards in sidebar
-  renderAgentCards(liveAgents);
+  renderAgentCards(mergedAgents);
 
   // Update room bubbles with new membership data
   updateRoomBubbles();
@@ -2763,6 +2812,8 @@ fetchBootstrap().then(() => {
 //  NATS BROWSER CONNECTION — live agent discovery
 // ─────────────────────────────────────────────
 const natsAgents = new Map(); // peerId -> { ...announcement, lastSeen }
+const nodeCapacity = new Map(); // peerId -> { models[], warmModel, systemMetrics, stats, lastSeen }
+window._nodeCapacity = nodeCapacity;
 const STALE_SIDEBAR_MS = 90_000; // 90s — remove sidebar card (no heartbeat)
 
 // Sweep every 30s — handle sidebar removal + full fadeout removal
@@ -2902,6 +2953,30 @@ async function connectNats() {
                 (conn.ia === toAgent.index && conn.ib === fromAgent.index)) {
               conn.commRate += (ev.tokensPerSec || 1) * 0.1;
             }
+          }
+        } catch { /* ignore malformed */ }
+      }
+    })().catch(() => {});
+
+    // Subscribe to capacity announcements — GPU/CPU/RAM metrics + warm model info
+    const capSub = nc.subscribe('nexus.agents.capacity');
+    (async () => {
+      for await (const msg of capSub) {
+        try {
+          const cap = JSON.parse(sc.decode(msg.data));
+          if (!cap.peerId) continue;
+          nodeCapacity.set(cap.peerId, {
+            models: cap.models || [],
+            warmModel: cap.warmModel || null,
+            systemMetrics: cap.systemMetrics || {},  // { cpu, memory, gpu, gpuName, vramUsed, vramTotal }
+            stats: cap.stats || {},                   // { queriesAnswered, avgLatencyMs }
+            lastSeen: Date.now(),
+          });
+          // Re-render sidebar card if this agent is known — shows fresh utilization
+          const agent = knownAgents.get(cap.peerId);
+          if (agent) {
+            const allAgents = Array.from(knownAgents.values()).map(e => e.data).filter(Boolean);
+            renderAgentCards(allAgents);
           }
         } catch { /* ignore malformed */ }
       }
@@ -3474,7 +3549,7 @@ document.getElementById('node-search').addEventListener('input', (e) => {
 
   function pickBestSponsor(sponsors) {
     if (!sponsors.length) return null;
-    // Score each sponsor — prefer qwen3.5/open-agents- models
+    // Score each sponsor — prefer warm models, low GPU util, low latency, qwen3.5/open-agents-
     let best = null, bestScore = -1;
     for (const sp of sponsors) {
       let score = 1;
@@ -3484,6 +3559,23 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       if (hasQwen35) score += 10;
       if (hasOA) score += 5;
       score += Math.min(models.length, 10); // more models = better
+
+      // Capacity-aware scoring — use real-time metrics from NATS capacity announcements
+      const cap = nodeCapacity.get(sp.peerId);
+      if (cap && (Date.now() - cap.lastSeen) < 120_000) { // capacity data < 2min old
+        // Warm model bonus — no cold-start latency
+        if (cap.warmModel) score += 8;
+        // GPU utilization — prefer less loaded (0-100 scale, lower = better)
+        const gpu = cap.systemMetrics?.gpu ?? 50;
+        score += Math.max(0, 10 - gpu / 10); // 0% GPU → +10, 100% → +0
+        // Latency — prefer lower average response time
+        const latency = cap.stats?.avgLatencyMs ?? 5000;
+        score += Math.max(0, 5 - latency / 2000); // 0ms → +5, 10s+ → +0
+        // Query volume — prefer proven sponsors
+        const queries = cap.stats?.queriesAnswered ?? 0;
+        if (queries > 0) score += Math.min(queries / 10, 3); // up to +3 for volume
+      }
+
       if (score > bestScore) { bestScore = score; best = sp; }
     }
     return best;

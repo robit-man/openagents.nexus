@@ -3435,18 +3435,58 @@ document.getElementById('node-search').addEventListener('input', (e) => {
               clearTimeout(window._cohereMeshnetTimeout);
               window._cohereMeshnetTimeout = null;
             }
-            // Display meshnet responses with source attribution and identity info
+            // Display meshnet responses with source attribution, model, and metadata
             const source = resp.agentName || (resp.peerId ? resp.peerId.slice(0, 8) : 'meshnet');
             removeTypingIndicator();
             const msgEl = addMessage(resp.content, 'agent', source + ' (network)');
-            // Show resolving node's identity hash if provided (read-only attestation)
+
+            // Model + latency metadata bar
+            const metaDiv = document.createElement('div');
+            metaDiv.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:8px;color:#666';
+            if (resp.model) {
+              const modelBadge = document.createElement('span');
+              modelBadge.style.cssText = 'background:rgba(255,174,0,0.12);color:#ffae00;padding:1px 5px;border-radius:3px';
+              modelBadge.textContent = resp.model;
+              metaDiv.appendChild(modelBadge);
+            }
+            if (resp.latencyMs) {
+              const latBadge = document.createElement('span');
+              latBadge.style.cssText = 'color:#555';
+              latBadge.textContent = resp.latencyMs + 'ms';
+              metaDiv.appendChild(latBadge);
+            }
+            if (resp.usage) {
+              const tokBadge = document.createElement('span');
+              tokBadge.style.cssText = 'color:#555';
+              const inTok = resp.usage.inputTokens || 0;
+              const outTok = resp.usage.outputTokens || 0;
+              tokBadge.textContent = inTok + '/' + outTok + ' tok';
+              metaDiv.appendChild(tokBadge);
+            }
+            if (resp.toolsUsed && resp.toolsUsed.length > 0) {
+              resp.toolsUsed.forEach(function(t) {
+                const toolBadge = document.createElement('span');
+                toolBadge.style.cssText = 'background:rgba(77,171,247,0.12);color:#4dabf7;padding:1px 5px;border-radius:3px';
+                toolBadge.textContent = t;
+                metaDiv.appendChild(toolBadge);
+              });
+            }
+            if (resp.signature) {
+              const sigBadge = document.createElement('span');
+              sigBadge.style.cssText = 'color:#51cf66';
+              sigBadge.textContent = 'signed';
+              metaDiv.appendChild(sigBadge);
+            }
+            msgEl.appendChild(metaDiv);
+
+            // Identity attestation row (IPFS CID, hash, version)
             if (resp.identityHash || resp.identityCid) {
               const idDiv = document.createElement('div');
-              idDiv.className = 'cohere-msg-source-network';
-              let idText = 'node identity: ';
-              if (resp.identityHash) idText += 'hash ' + resp.identityHash.slice(0, 12) + '...';
-              if (resp.identityCid) idText += (resp.identityHash ? ' | ' : '') + 'ipfs ' + resp.identityCid.slice(0, 16) + '...';
-              if (resp.identityVersion) idText += ' (v' + resp.identityVersion + ')';
+              idDiv.style.cssText = 'font-size:7px;color:#444;margin-top:2px';
+              let idText = 'identity: ';
+              if (resp.identityHash) idText += resp.identityHash.slice(0, 12) + '...';
+              if (resp.identityCid) idText += (resp.identityHash ? ' | ' : '') + 'ipfs:' + resp.identityCid.slice(0, 16) + '...';
+              if (resp.identityVersion) idText += ' v' + resp.identityVersion;
               idDiv.textContent = idText;
               msgEl.appendChild(idDiv);
             }

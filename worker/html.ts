@@ -3595,8 +3595,10 @@ document.getElementById('node-search').addEventListener('input', (e) => {
 
   async function resolveViaSponsor() {
     const sponsors = await fetchSponsors();
-    const sponsor = pickBestSponsor(sponsors);
-    if (!sponsor) throw new Error('No sponsors available');
+    // Only consider sponsors with an HTTPS tunnel — P2P-only sponsors use meshnet path
+    const httpsSponsors = sponsors.filter(s => s.tunnelUrl && s.tunnelUrl.startsWith('http'));
+    const sponsor = pickBestSponsor(httpsSponsors);
+    if (!sponsor) throw new Error('No HTTPS sponsors available (P2P-only → meshnet)');
 
     const model = pickModel(sponsor);
     const baseUrl = sponsor.tunnelUrl.replace(/\\/+$/, '');
@@ -3694,29 +3696,33 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     }
 
     // 2. Fall back to NATS meshnet broadcast
+    // NATS is pub/sub — nodes listening on nexus.cohere.query don't need to be in natsAgents.
+    // Broadcast even with 0 visible peers — a COHERE-enabled daemon may still be subscribed.
     const meshnetSent = broadcastToMeshnet(text, queryId);
-    if (meshnetSent && natsAgents.size > 0) {
-      pushLog('Meshnet broadcast to ' + natsAgents.size + ' node(s)');
-      chatStatus.textContent = 'awaiting meshnet (' + natsAgents.size + ' nodes)...';
+    if (meshnetSent) {
+      const peerCount = natsAgents.size;
+      pushLog('Meshnet broadcast' + (peerCount > 0 ? ' to ' + peerCount + ' visible node(s)' : ' (peers may be listening)'));
+      chatStatus.textContent = peerCount > 0
+        ? 'awaiting meshnet (' + peerCount + ' nodes)...'
+        : 'awaiting meshnet response...';
       chatStatus.style.color = '#4dabf7';
       const meshTimeout = setTimeout(() => {
         window._cohereMeshnetTimeout = null;
         removeTypingIndicator();
-        addMessage('No sponsors responded and meshnet query to ' +
-          natsAgents.size + ' node(s) timed out. Sponsors may be offline — try again shortly.', 'agent', 'info');
+        addMessage('Meshnet query timed out. Make sure a COHERE-enabled node is running — start "oa" then "/nexus connect" and "/cohere enable".', 'agent', 'info');
         chatStatus.textContent = 'distributed mind';
         chatStatus.style.color = '#555';
         chatSend.disabled = false;
         isSending = false;
         chatInput.focus();
-      }, 15000);
+      }, 30000);
       window._cohereMeshnetTimeout = meshTimeout;
       return;
     }
 
     // 3. No sponsors, no meshnet nodes — show helpful message
     removeTypingIndicator();
-    addMessage('No inference sponsors online right now. Sponsors share their GPU power with the network — check back shortly or run "oa" with "/sponsor" to contribute.', 'agent', 'info');
+    addMessage('Could not connect to NATS. To enable inference: 1) Install "oa" (npm i -g open-agents-ai), 2) Run /nexus connect, 3) Run /cohere enable. Your node will then respond to queries from this chat.', 'agent', 'info');
     chatStatus.textContent = 'waiting for sponsors';
     chatStatus.style.color = '#555';
     chatSend.disabled = false;

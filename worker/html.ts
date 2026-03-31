@@ -3852,13 +3852,13 @@ document.getElementById('node-search').addEventListener('input', (e) => {
       const meshTimeout = setTimeout(() => {
         window._cohereMeshnetTimeout = null;
         removeTypingIndicator();
-        addMessage('Meshnet query timed out. Make sure a COHERE-enabled node is running — start "oa" then "/nexus connect" and "/cohere enable".', 'agent', 'info');
+        addMessage('Meshnet query timed out after 60s. Make sure a COHERE-enabled node is running — start "oa" then "/nexus connect" and "/cohere enable".', 'agent', 'info');
         chatStatus.textContent = 'distributed mind';
         chatStatus.style.color = '#555';
         chatSend.disabled = false;
         isSending = false;
         chatInput.focus();
-      }, 30000);
+      }, 60000);
       window._cohereMeshnetTimeout = meshTimeout;
       return;
     }

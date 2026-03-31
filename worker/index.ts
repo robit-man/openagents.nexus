@@ -158,6 +158,104 @@ function invalidateCache(key: string): void {
   kvCache.delete(key);
 }
 
+// COHERE relay rate limiting — per-IP, in-memory (resets on worker restart)
+const cohereRateLimit = new Map<string, number[]>();
+
+/**
+ * Relay a COHERE query through NATS using raw WebSocket protocol.
+ * CF Workers support outgoing WebSocket via `new WebSocket()`.
+ *
+ * NATS text protocol:
+ *   → CONNECT {"verbose":false,"pedantic":false}\r\n
+ *   ← INFO {...}\r\n
+ *   → SUB nexus.cohere.response <sid>\r\n
+ *   → PUB nexus.cohere.query <len>\r\n<payload>\r\n
+ *   ← MSG nexus.cohere.response <sid> <len>\r\n<payload>\r\n
+ */
+async function relayViaNats(query: string, queryId: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try { ws.close(); } catch {}
+      reject(new Error('NATS relay timeout (25s) — no COHERE node responded. Are nodes running with /cohere enable?'));
+    }, 25_000);
+
+    const ws = new WebSocket('wss://demo.nats.io:8443');
+    let connected = false;
+    let subId = 'cohere_relay_' + queryId.slice(0, 8);
+    const payload = JSON.stringify({
+      type: 'cohere.query',
+      queryId,
+      query,
+      timestamp: Date.now(),
+      source: 'nexus-api-relay',
+    });
+
+    ws.addEventListener('open', () => {
+      // Send CONNECT
+      ws.send('CONNECT {"verbose":false,"pedantic":false,"name":"nexus-cf-relay"}\r\n');
+      // Subscribe to responses
+      ws.send('SUB nexus.cohere.response ' + subId + '\r\n');
+      // Publish query
+      const encoded = new TextEncoder().encode(payload);
+      ws.send('PUB nexus.cohere.query ' + encoded.length + '\r\n' + payload + '\r\n');
+      connected = true;
+    });
+
+    ws.addEventListener('message', (event) => {
+      const data = typeof event.data === 'string' ? event.data : '';
+
+      // Handle NATS protocol messages
+      if (data.startsWith('PING')) {
+        ws.send('PONG\r\n');
+        return;
+      }
+
+      // Look for MSG — response from a COHERE node
+      if (data.startsWith('MSG nexus.cohere.response')) {
+        // MSG format: MSG <subject> <sid> [reply-to] <len>\r\n<payload>\r\n
+        const lines = data.split('\r\n');
+        // The payload is the line(s) after the MSG header
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          try {
+            const resp = JSON.parse(line);
+            if (resp.queryId === queryId && resp.content) {
+              clearTimeout(timeout);
+              ws.close();
+              resolve({
+                ok: true,
+                queryId,
+                content: resp.content,
+                model: resp.model,
+                provider: resp.agentName || resp.provider,
+                latencyMs: resp.latencyMs,
+                signature: resp.signature,
+                identityHash: resp.identityHash,
+                identityCid: resp.identityCid,
+                identityVersion: resp.identityVersion,
+              });
+              return;
+            }
+          } catch { /* not JSON, skip */ }
+        }
+      }
+    });
+
+    ws.addEventListener('error', () => {
+      clearTimeout(timeout);
+      reject(new Error('NATS WebSocket connection failed — demo.nats.io may be down'));
+    });
+
+    ws.addEventListener('close', () => {
+      if (!connected) {
+        clearTimeout(timeout);
+        reject(new Error('NATS WebSocket closed before connecting'));
+      }
+    });
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -822,6 +920,125 @@ License: AGPL-3.0
             ...CORS_HEADERS,
           },
         });
+      }
+
+      // ── COHERE query relay — server-side NATS bridge for testing ──
+      // POST /api/v1/cohere/query { "query": "..." }
+      // Connects to NATS from the CF Worker, publishes to nexus.cohere.query,
+      // waits for a response on nexus.cohere.response, returns it.
+      // Rate limited: 10 req/min per IP.
+      case '/api/v1/cohere/query': {
+        if (request.method !== 'POST') {
+          return json({ error: 'POST required', usage: 'POST /api/v1/cohere/query {"query":"your question"}' }, 405);
+        }
+
+        // Rate limit: 10 req/min per IP
+        const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const now = Date.now();
+        if (!cohereRateLimit.has(clientIp)) {
+          cohereRateLimit.set(clientIp, []);
+        }
+        const timestamps = cohereRateLimit.get(clientIp)!;
+        // Evict old entries
+        while (timestamps.length > 0 && timestamps[0] < now - 60_000) timestamps.shift();
+        if (timestamps.length >= 10) {
+          return json({ error: 'Rate limited — max 10 requests per minute', retryAfter: Math.ceil((timestamps[0] + 60_000 - now) / 1000) }, 429);
+        }
+        timestamps.push(now);
+
+        let body: any;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ error: 'Invalid JSON body. Send {"query":"your question"}' }, 400);
+        }
+        const queryText = body?.query;
+        if (!queryText || typeof queryText !== 'string' || queryText.length < 1) {
+          return json({ error: 'Missing "query" field' }, 400);
+        }
+        if (queryText.length > 4000) {
+          return json({ error: 'Query too long (max 4000 chars)' }, 400);
+        }
+
+        const queryId = crypto.randomUUID();
+
+        // Connect to NATS via WebSocket and relay the query
+        try {
+          const result = await relayViaNats(queryText, queryId);
+          return json(result);
+        } catch (e: any) {
+          return json({ error: e.message || 'NATS relay failed', queryId, hint: 'Ensure COHERE-enabled nodes are running: oa → /nexus connect → /cohere enable' }, 504);
+        }
+      }
+
+      // ── COHERE debug — show NATS connection status and meshnet diagnostics ──
+      case '/api/v1/cohere/status': {
+        return json({
+          natsServer: 'wss://demo.nats.io:8443',
+          queryTopic: 'nexus.cohere.query',
+          responseTopic: 'nexus.cohere.response',
+          timeout: '25s',
+          rateLimit: '10 req/min per IP',
+          endpoints: {
+            query: 'POST /api/v1/cohere/query {"query":"hello"} — relay query through NATS',
+            ping: 'GET /api/v1/cohere/ping — test NATS connectivity from CF Worker',
+            status: 'GET /api/v1/cohere/status — this document',
+          },
+          hint: 'Nodes must run: oa → /nexus connect → /cohere enable. Both browser and daemon use wss://demo.nats.io:8443.',
+        });
+      }
+
+      // ── COHERE ping — test NATS WebSocket connectivity from CF Worker ──
+      case '/api/v1/cohere/ping': {
+        try {
+          const pingResult = await new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              try { pingWs.close(); } catch {}
+              reject(new Error('NATS WebSocket timeout (5s)'));
+            }, 5_000);
+
+            const pingWs = new WebSocket('wss://demo.nats.io:8443');
+
+            pingWs.addEventListener('open', () => {
+              pingWs.send('CONNECT {"verbose":false,"pedantic":false,"name":"nexus-cf-ping"}\r\n');
+              pingWs.send('PING\r\n');
+            });
+
+            pingWs.addEventListener('message', (event) => {
+              const data = typeof event.data === 'string' ? event.data : '';
+              if (data.includes('INFO')) {
+                // Parse NATS INFO
+                try {
+                  const infoJson = data.replace(/^INFO\s+/, '').split('\r\n')[0];
+                  const info = JSON.parse(infoJson);
+                  clearTimeout(timer);
+                  pingWs.close();
+                  resolve({
+                    ok: true,
+                    natsConnected: true,
+                    server: info.server_name || info.server_id,
+                    version: info.version,
+                    maxPayload: info.max_payload,
+                    clientCount: info.client_id,
+                  });
+                } catch {}
+              }
+              if (data.includes('PONG')) {
+                clearTimeout(timer);
+                pingWs.close();
+                resolve({ ok: true, natsConnected: true, pong: true });
+              }
+            });
+
+            pingWs.addEventListener('error', () => {
+              clearTimeout(timer);
+              reject(new Error('NATS WebSocket connection error'));
+            });
+          });
+          return json(pingResult);
+        } catch (e: any) {
+          return json({ ok: false, natsConnected: false, error: e.message }, 503);
+        }
       }
 
       default: {

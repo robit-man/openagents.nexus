@@ -3520,11 +3520,42 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     } catch { /* NATS not available */ }
   }
 
-  // Start listening for meshnet responses once NATS is ready
+  // CO-03: Listen for mood/excitement announcements from sponsors
+  function listenForMood() {
+    const nc = window._natsConn;
+    const sc = window._natsCodec;
+    if (!nc || !sc) return;
+    const moodSub = nc.subscribe('nexus.cohere.mood');
+    (async () => {
+      for await (const msg of moodSub) {
+        try {
+          const mood = JSON.parse(sc.decode(msg.data));
+          if (!mood.peerId || !mood.queryId) continue;
+          const name = mood.agentName || mood.peerId.slice(0, 8);
+          const pct = Math.round((mood.excitement || 0) * 100);
+          pushLog('<span style="color:#ffae00">' + escHtml(name) + '</span> excited ' +
+            '<span class="log-highlight">' + pct + '%</span> — ' +
+            escHtml(mood.reason || '') +
+            (mood.warmModel ? ' [' + escHtml(mood.warmModel) + ']' : ''));
+          console.log('[COHERE] Mood:', name, pct + '%', mood.reason, mood.warmModel);
+          // Pulse the Three.js node proportional to excitement
+          const agentEntry = knownAgents.get(mood.peerId);
+          if (agentEntry && nodes[agentEntry.index]) {
+            const nd = nodes[agentEntry.index];
+            nd.blinkUntil = performance.now() + 800 + pct * 10; // longer blink = more excited
+            if (nd.light) nd.light.intensity = 1 + (mood.excitement || 0) * 4;
+          }
+        } catch {}
+      }
+    })().catch(() => {});
+  }
+
+  // Start listening for meshnet responses + mood once NATS is ready
   const meshnetPollId = setInterval(() => {
     if (window._natsConn) {
       clearInterval(meshnetPollId);
       listenForMeshnetResponses();
+      listenForMood();
     }
   }, 2000);
 

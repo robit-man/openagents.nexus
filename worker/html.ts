@@ -2860,8 +2860,9 @@ async function connectNats() {
   try {
     // nats.ws ESM bundle from CDN
     const natsModule = await import('https://cdn.jsdelivr.net/npm/nats.ws@1.30.3/esm/nats.js');
-    const nc = await natsModule.connect({ servers: 'wss://demo.nats.io:8443', timeout: 5000 });
-    pushLog('NATS connected to <span class="log-highlight">demo.nats.io</span>');
+    const nc = await natsModule.connect({ servers: 'wss://demo.nats.io:8443', timeout: 10000 });
+    pushLog('NATS connected to <span class="log-highlight">demo.nats.io</span> — COHERE chat ready');
+    console.log('[NATS] Connected to demo.nats.io:8443 — COHERE queries will route through this connection');
 
     const sc = natsModule.StringCodec();
 
@@ -3386,18 +3387,26 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     try {
       const nc = window._natsConn;
       const sc = window._natsCodec;
-      if (!nc || !sc) return false;
+      if (!nc || !sc) {
+        pushLog('<span style="color:#ff6b6b">NATS not connected</span> — nc=' + !!nc + ' sc=' + !!sc);
+        console.warn('[COHERE] broadcastToMeshnet: NATS not connected', { nc: !!nc, sc: !!sc });
+        return false;
+      }
 
-      nc.publish('nexus.cohere.query', sc.encode(JSON.stringify({
+      const payload = {
         type: 'cohere.query',
         queryId,
         query: text,
         timestamp: Date.now(),
-        source: 'nexus-frontend'
-        // NOTE: No identity data included — isolated by design (COHERE security)
-      })));
+        source: 'nexus-frontend',
+      };
+      nc.publish('nexus.cohere.query', sc.encode(JSON.stringify(payload)));
+      pushLog('Published query <span class="log-highlight">' + queryId.slice(0, 12) + '</span> to nexus.cohere.query');
+      console.log('[COHERE] Published query:', queryId, payload);
       return true;
-    } catch {
+    } catch (err) {
+      pushLog('<span style="color:#ff6b6b">Publish failed: ' + (err.message || err) + '</span>');
+      console.error('[COHERE] broadcastToMeshnet error:', err);
       return false;
     }
   }
@@ -3407,13 +3416,19 @@ document.getElementById('node-search').addEventListener('input', (e) => {
     try {
       const nc = window._natsConn;
       const sc = window._natsCodec;
-      if (!nc || !sc) return;
+      if (!nc || !sc) {
+        console.warn('[COHERE] listenForMeshnetResponses: NATS not ready');
+        return;
+      }
 
       const sub = nc.subscribe('nexus.cohere.response');
+      pushLog('Subscribed to <span class="log-highlight">nexus.cohere.response</span>');
+      console.log('[COHERE] Subscribed to nexus.cohere.response');
       (async () => {
         for await (const msg of sub) {
           try {
             const resp = JSON.parse(sc.decode(msg.data));
+            console.log('[COHERE] Received response:', resp.queryId, resp.agentName || resp.provider, resp.content?.slice(0, 80));
             if (!resp.queryId || !resp.content) continue;
             // Cancel meshnet timeout if pending
             if (window._cohereMeshnetTimeout) {

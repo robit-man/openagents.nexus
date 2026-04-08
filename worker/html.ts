@@ -6,9 +6,9 @@
  * so the Cloudflare Worker picks up the latest frontend on the next
  * `wrangler deploy`.
  *
- * Lines: 5458
- * Bytes: 209666
- * Generated: 2026-04-08T20:08:13.976Z
+ * Lines: 5557
+ * Bytes: 214533
+ * Generated: 2026-04-08T21:01:13.919Z
  */
 export const INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -1574,6 +1574,35 @@ function publishRoomAudio(roomId, float32, sampleRate = 16000, meta = {}) {
 }
 window.publishRoomAudio = publishRoomAudio;
 
+// ── Deterministic room position fallback ──────────────────────────
+// When a room has no primary members (every member's first room is
+// elsewhere) AND no cached centroid, we need somewhere to place the
+// bubble so it doesn't collapse to the scene origin and pile up with
+// every other orphan room. Hash the roomId to a point on the boundary
+// sphere — same string always produces the same angle, so rooms
+// spread out deterministically around the outer shell.
+function fallbackRoomCentroid(roomId, out) {
+  // Simple string hash → two independent angles (theta + phi)
+  let h1 = 2166136261 >>> 0;
+  let h2 = 0x9e3779b1 >>> 0;
+  for (let i = 0; i < roomId.length; i++) {
+    const c = roomId.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = Math.imul(h2 + c, 2654435761) >>> 0;
+  }
+  const theta = (h1 / 0xffffffff) * Math.PI * 2;          // [0, 2π)
+  const phi   = Math.acos(2 * (h2 / 0xffffffff) - 1);     // uniform on sphere
+  // Place at ~85% of the polyp distance so the bubble sits near the
+  // boundary shell but doesn't clip past the force field radius.
+  const r = (typeof ROOM_SIM !== 'undefined' ? ROOM_SIM.POLYP_DIST : 10.0) * 0.85;
+  out.set(
+    r * Math.sin(phi) * Math.cos(theta),
+    r * Math.cos(phi) * 0.5,   // flatten vertically so rooms orbit roughly in-plane
+    r * Math.sin(phi) * Math.sin(theta),
+  );
+  return out;
+}
+
 // ── Multi-room agent superposition ─────────────────────────────────
 // When an agent joins multiple rooms, we render (N-1) ghost copies of
 // the agent's node — one inside each non-primary room — connected by
@@ -2523,15 +2552,49 @@ function stepSimulation() {
     b._force.sub(_tmpForce);
   }
 
-  // 3. Centering + boundary
+  // 3. Centering + boundary + anti-origin
+  // CORE_EXCLUSION_R is the "forbidden zone" around the scene origin.
+  // Nothing should ever sit directly at (0,0,0) — the core icosahedron
+  // lives there and any node piling up on it looks like a bug. When a
+  // node drifts inside this radius we inject a strong outward push
+  // proportional to how deep it is, until it's pushed out of the zone.
+  const CORE_EXCLUSION_R = 2.5;
+  const CORE_PUSH_K     = 0.08;
   for (let i = 0; i < n; i++) {
     const nd = activeNodes[i];
-    // Gentle centering pull
-    activeNodes[i]._force.add(
-      _tmpForce.copy(nd.pos).negate().multiplyScalar(SIM.CENTERING)
-    );
-    // Soft boundary: push back when beyond BOUNDARY radius
     const r = nd.pos.length();
+    // Anti-origin push — the hard "no one sits at center" rule. Applied
+    // BEFORE centering so it always wins when the two forces compete.
+    if (r < CORE_EXCLUSION_R) {
+      // Use a deterministic direction when the node is exactly at origin
+      // (length() === 0) so the push isn't NaN. Otherwise push radially
+      // outward along the node's own position vector.
+      let dirX, dirY, dirZ;
+      if (r < 1e-4) {
+        // Spread seed: prime-mixed index for variety
+        const a = (i * 2.39996322972865332) % (Math.PI * 2); // golden angle
+        const b = Math.acos(1 - 2 * (((i * 7) % 100) / 100));
+        dirX = Math.sin(b) * Math.cos(a);
+        dirY = Math.cos(b);
+        dirZ = Math.sin(b) * Math.sin(a);
+      } else {
+        dirX = nd.pos.x / r;
+        dirY = nd.pos.y / r;
+        dirZ = nd.pos.z / r;
+      }
+      const depth = CORE_EXCLUSION_R - r;
+      const mag = depth * CORE_PUSH_K * 6; // strong push — wins over centering
+      nd._force.x += dirX * mag;
+      nd._force.y += dirY * mag;
+      nd._force.z += dirZ * mag;
+    } else {
+      // Only apply the gentle centering pull OUTSIDE the exclusion zone.
+      // Inside the zone it would fight the anti-origin push.
+      activeNodes[i]._force.add(
+        _tmpForce.copy(nd.pos).negate().multiplyScalar(SIM.CENTERING)
+      );
+    }
+    // Soft boundary: push back when beyond BOUNDARY radius
     if (r > SIM.BOUNDARY) {
       const pushBack = (r - SIM.BOUNDARY) * SIM.BOUNDARY_K;
       activeNodes[i]._force.add(
@@ -3274,13 +3337,24 @@ function animate() {
       bubble._lastCentroid.copy(_tmpCentroid);
       bubble._lastMaxDist = maxDist;
     } else {
-      // Archived / empty — fall back to the cached geometry so the
-      // bubble remains on-screen and hoverable until its 7d TTL.
+      // No primary members this tick. Three fallbacks in order:
+      //   1. Use the cached _lastCentroid from when it HAD primaries
+      //      (archived room path — keep rendering the last known spot)
+      //   2. Use a deterministic hash-based position for orphan rooms
+      //      (created by an agent who was already in another room — no
+      //      primary anchor, so we scatter them around the boundary
+      //      sphere instead of piling at origin)
+      //   3. Keep the current mesh position as last resort
       if (bubble._lastCentroid) {
         _tmpCentroid.copy(bubble._lastCentroid);
         maxDist = bubble._lastMaxDist || 2.0;
       } else {
-        return; // never had any members — nothing to render yet
+        // Orphan room: deterministic fallback around the boundary shell
+        bubble._lastCentroid = new THREE.Vector3();
+        fallbackRoomCentroid(bubble._roomId || roomId, bubble._lastCentroid);
+        _tmpCentroid.copy(bubble._lastCentroid);
+        bubble._lastMaxDist = 2.0;
+        maxDist = 2.0;
       }
     }
 
@@ -4837,7 +4911,15 @@ function updateRoomsDropdown() {
 
   const list = details.querySelector('.dropdown-list');
   const summary = details.querySelector('summary');
-  list.innerHTML = '';
+  // NEVER full-wipe the list. Diff-update so existing cards aren't
+  // flashed in and out on every call (which the user saw as
+  // "nodes-list getting flushed when the KV namespace updates").
+  // Cards are keyed by data-room-id; we mark each with a "seen" flag
+  // during this pass and remove any that weren't touched at the end.
+  const _existingCards = new Map();
+  list.querySelectorAll('[data-room-id]').forEach(el => {
+    _existingCards.set(el.getAttribute('data-room-id'), el);
+  });
 
   // Collect rooms from knownAgents
   const roomMap = new Map();
@@ -4857,12 +4939,21 @@ function updateRoomsDropdown() {
   }
 
   for (const [roomId, members] of roomMap) {
-    const card = document.createElement('div');
-    card.className = 'peer-card';
-    card.style.cursor = 'pointer';
-    card.setAttribute('role', 'button');
-    card.setAttribute('tabindex', '0');
-    card.setAttribute('data-room-id', roomId);
+    // Reuse existing card if we have one (diff update path), else
+    // create a fresh one. Either way the innerHTML is refreshed below
+    // so member counts / archive state / mic state stay current, but
+    // the DOM element itself isn't torn down — avoids the visual flash.
+    let card = _existingCards.get(roomId);
+    const isNew = !card;
+    if (isNew) {
+      card = document.createElement('div');
+      card.className = 'peer-card';
+      card.style.cursor = 'pointer';
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('data-room-id', roomId);
+    }
+    _existingCards.delete(roomId); // mark as "seen" so it's not culled
     card.title = 'open thread history for ' + roomId;
     // Visual cue for archived rooms
     const rec = roomStore.get(roomId);
@@ -4888,29 +4979,31 @@ function updateRoomsDropdown() {
         <div class="peer-meta-item" style="font-size:7px;color:#555">\${_escHtml(members.join(', ') || '—')}</div>
       </div>
     \`;
-    // Click (and keyboard Enter/Space) opens the room forum modal.
-    const open = (ev) => {
-      // Mic button gets its own handler — don't open the modal on mic
-      // click because the button is inside the card's hit area.
-      if (ev.target && ev.target.closest && ev.target.closest('[data-room-mic]')) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      openRoomModal(roomId);
-    };
-    card.addEventListener('click', open);
-    card.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') open(ev);
-    });
-    // Hover = spotlight this room: sidebar card goes gold + the 3D
-    // bubble's wireframe flips to #ffae00 and the icosahedron expands
-    // cleanly via the animate loop's hover lerp.
-    card.addEventListener('mouseenter', () => setHoveredRoom(roomId));
-    card.addEventListener('mouseleave', () => setHoveredRoom(null));
-    card.addEventListener('focus',      () => setHoveredRoom(roomId));
-    card.addEventListener('blur',       () => setHoveredRoom(null));
-    // Mic button toggles streaming for this room. Clicking the same
-    // room's mic again stops the stream; clicking a different room
-    // switches the target.
+    // Wire listeners ONCE per card. For reused cards we skip the
+    // addEventListener calls entirely so we don't stack handlers on
+    // every diff update. (Addition would fire the click handler N
+    // times after N refresh cycles — silent memory leak.)
+    if (isNew) {
+      const open = (ev) => {
+        // Mic button gets its own handler — don't open the modal on mic
+        // click because the button is inside the card's hit area.
+        if (ev.target && ev.target.closest && ev.target.closest('[data-room-mic]')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        openRoomModal(roomId);
+      };
+      card.addEventListener('click', open);
+      card.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') open(ev);
+      });
+      card.addEventListener('mouseenter', () => setHoveredRoom(roomId));
+      card.addEventListener('mouseleave', () => setHoveredRoom(null));
+      card.addEventListener('focus',      () => setHoveredRoom(roomId));
+      card.addEventListener('blur',       () => setHoveredRoom(null));
+    }
+    // Mic button is re-created on every innerHTML refresh, so its
+    // listener has to be rewired every time. Scope the rewire to the
+    // new child element so we're only ever attached to live DOM.
     const micBtn = card.querySelector('[data-room-mic]');
     if (micBtn) {
       micBtn.addEventListener('click', (ev) => {
@@ -4921,11 +5014,17 @@ function updateRoomsDropdown() {
         } else {
           startMicStream(roomId);
         }
-        // Repaint the dropdown so the mic button reflects the new state
         setTimeout(updateRoomsDropdown, 50);
       });
     }
-    list.appendChild(card);
+    if (isNew) list.appendChild(card);
+  }
+
+  // Cull cards for rooms that weren't seen this pass (room gone,
+  // e.g. TTL expired). Any entry left in _existingCards was not
+  // touched above, so its room no longer exists in the map.
+  for (const stale of _existingCards.values()) {
+    stale.remove();
   }
 
   summary.textContent = 'rooms (' + roomMap.size + ')';

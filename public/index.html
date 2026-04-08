@@ -690,6 +690,16 @@
     color: rgba(255, 255, 255, 0.5);
     font-style: italic;
   }
+
+  /* Hovered room card: gold border + subtle glow. Mirrors the 3D bubble
+   * accent the animate loop tweens toward when hover is set. */
+  .peer-card.room-hover {
+    border-color: #ffae00 !important;
+    box-shadow: 0 0 6px rgba(255, 174, 0, 0.45), inset 0 0 10px rgba(255, 174, 0, 0.06);
+    background: rgba(255, 174, 0, 0.04) !important;
+  }
+  .peer-card.room-hover .peer-name-text { color: #ffae00; }
+  .peer-card.room-hover .peer-dot { background: #ffae00 !important; box-shadow: 0 0 4px #ffae00 !important; }
 </style>
 </head>
 <body>
@@ -1140,9 +1150,9 @@ const POST_TTL_MS          = 24 * 60 * 60 * 1000;      // 24 hours — post life
 const ROOM_ARCHIVE_TTL_MS  = 7  * 24 * 60 * 60 * 1000; // 7 days — archived room lifetime
 const POLYP_RADIUS         = 0.09;
 const POLYP_SEGMENTS       = 8;
-const LABEL_TARGET_PX      = 22;   // clamped target pixel height for polyp labels
-const LABEL_MIN_PX         = 14;
-const LABEL_MAX_PX         = 34;
+const LABEL_TARGET_PX      = 32;   // clamped target pixel height for polyp labels
+const LABEL_MIN_PX         = 22;
+const LABEL_MAX_PX         = 56;
 // Shared polyp geometry — every post polyp clones the same tiny sphere
 const SHARED_POLYP_GEO     = new THREE.SphereGeometry(POLYP_RADIUS, POLYP_SEGMENTS, POLYP_SEGMENTS);
 
@@ -1353,7 +1363,9 @@ function _float32ToPcm16(f32) {
 }
 
 /** Schedule a Float32 audio frame for immediate playback on a per-peer
- *  continuous cursor. Called from the NATS voice subscription loop. */
+ *  continuous cursor. Spatializes through a PannerNode positioned at the
+ *  speaker's 3D node location so the user hears directional audio as the
+ *  camera moves around the scene. */
 function _enqueuePeerAudio(peerId, float32, srcSampleRate) {
   const ctx = _getVoiceCtx();
   if (!ctx || !float32 || float32.length === 0) return;
@@ -1365,10 +1377,29 @@ function _enqueuePeerAudio(peerId, float32, srcSampleRate) {
 
   let peer = _voicePeers.get(peerId);
   if (!peer) {
-    const gain = ctx.createGain();
+    // Per-peer signal chain: source → gain → panner → destination
+    // Panner uses HRTF for binaural spatialization; inverse distance
+    // model with large rolloff so far-away rooms fade out gradually
+    // without becoming inaudible entirely.
+    const gain   = ctx.createGain();
     gain.gain.value = 1.0;
-    gain.connect(ctx.destination);
-    peer = { cursor: 0, gain, lastChunkMs: 0 };
+    let panner = null;
+    if (typeof ctx.createPanner === 'function') {
+      panner = ctx.createPanner();
+      panner.panningModel = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = 3;     // world units at which volume ~= 1
+      panner.maxDistance = 40;
+      panner.rolloffFactor = 1.4;
+      panner.coneInnerAngle = 360; // omnidirectional
+      panner.coneOuterAngle = 0;
+      panner.coneOuterGain = 0;
+      gain.connect(panner);
+      panner.connect(ctx.destination);
+    } else {
+      gain.connect(ctx.destination);
+    }
+    peer = { cursor: 0, gain, panner, lastChunkMs: 0 };
     _voicePeers.set(peerId, peer);
   }
 
@@ -1531,6 +1562,144 @@ function publishRoomAudio(roomId, float32, sampleRate = 16000, meta = {}) {
 }
 window.publishRoomAudio = publishRoomAudio;
 
+// ── Multi-room agent superposition ─────────────────────────────────
+// When an agent joins multiple rooms, we render (N-1) ghost copies of
+// the agent's node — one inside each non-primary room — connected by
+// thick emissive lines that represent the quantum-style "superposition"
+// of the agent occupying several rooms at once. The primary room is
+// always rooms[0]; the real node lives there, ghosts live elsewhere.
+// This keeps each room's centroid drawn only from its own primary
+// members so rooms naturally spread apart instead of overlapping.
+const agentGhosts  = new Map();       // peerId → Array<{ roomId, mesh, pos, targetPos }>
+const superposGroup = new THREE.Group();
+superposGroup.name  = 'superposition';
+scene.add(superposGroup);
+const superposLines = new Map();      // peerId → THREE.Line
+const SUPERPOS_COLOR = 0xffffff;
+
+function _makeGhostMesh() {
+  // Ghost nodes share the agent icosahedron geometry but use a softer,
+  // translucent material so they read as "echoes" of the real agent.
+  const mat = new THREE.MeshStandardMaterial({
+    color:            0xeeeeee,
+    emissive:         new THREE.Color(0xddddff),
+    emissiveIntensity: 0.7,
+    roughness:        0.15,
+    metalness:        0.8,
+    transparent:      true,
+    opacity:          0.55,
+  });
+  const mesh = new THREE.Mesh(SHARED_AGENT_GEO.clone(), mat);
+  mesh.scale.setScalar(0.75); // slightly smaller than real node
+  return mesh;
+}
+
+function _removeGhost(entry) {
+  if (!entry || !entry.mesh) return;
+  scene.remove(entry.mesh);
+  entry.mesh.geometry?.dispose?.();
+  entry.mesh.material?.dispose?.();
+}
+
+function _clearGhostsForAgent(peerId) {
+  const list = agentGhosts.get(peerId);
+  if (!list) return;
+  for (const g of list) _removeGhost(g);
+  agentGhosts.delete(peerId);
+  const line = superposLines.get(peerId);
+  if (line) {
+    superposGroup.remove(line);
+    line.geometry?.dispose?.();
+    line.material?.dispose?.();
+    superposLines.delete(peerId);
+  }
+}
+
+/** Recompute ghost meshes + superposition line for every multi-room
+ *  agent. Called from updateRoomBubbles whenever membership changes. */
+function rebuildSuperposition() {
+  // Clear ghosts for agents that no longer exist or no longer have >1 room
+  const seenPeers = new Set();
+  for (const [peerId, agent] of knownAgents) {
+    seenPeers.add(peerId);
+    const rooms = (agent.data?.rooms || []).filter(r => roomBubbles.has(r));
+    if (rooms.length <= 1) { _clearGhostsForAgent(peerId); continue; }
+
+    // Primary room = rooms[0]. Ghosts inhabit rooms[1..]
+    const extraRooms = rooms.slice(1);
+    let list = agentGhosts.get(peerId);
+    if (!list) { list = []; agentGhosts.set(peerId, list); }
+
+    // Trim any ghost whose room has disappeared
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (!extraRooms.includes(list[i].roomId) || !roomBubbles.has(list[i].roomId)) {
+        _removeGhost(list[i]);
+        list.splice(i, 1);
+      }
+    }
+    // Add ghost meshes for new extra rooms
+    for (const rid of extraRooms) {
+      if (list.find(g => g.roomId === rid)) continue;
+      const mesh = _makeGhostMesh();
+      scene.add(mesh);
+      list.push({ roomId: rid, mesh, pos: new THREE.Vector3(), targetPos: new THREE.Vector3() });
+    }
+
+    // Superposition line — one polyline connecting real node + every ghost
+    let line = superposLines.get(peerId);
+    if (!line) {
+      const pointCount = 1 + extraRooms.length;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pointCount * 3), 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: SUPERPOS_COLOR,
+        transparent: true,
+        opacity: 0.75,
+        linewidth: 3, // note: WebGL ignores >1 but keeps semantic intent; hidden by glow
+        depthWrite: false,
+      });
+      line = new THREE.Line(geo, mat);
+      line.renderOrder = 2;
+      superposGroup.add(line);
+      superposLines.set(peerId, line);
+    } else {
+      // Resize buffer if ghost count changed
+      const needed = (1 + extraRooms.length) * 3;
+      const attr = line.geometry.attributes.position;
+      if (attr.array.length !== needed) {
+        line.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(needed), 3));
+      }
+    }
+  }
+  // Drop ghosts for agents that vanished entirely
+  for (const pid of Array.from(agentGhosts.keys())) {
+    if (!seenPeers.has(pid)) _clearGhostsForAgent(pid);
+  }
+}
+
+// ── Room hover spotlight ────────────────────────────────────────────
+// Set from either sidebar card hover or 3D raycast hover. Animate loop
+// lerps bubble scale toward HOVER_SCALE, swaps wireframe color toward
+// #ffae00, and pushes the sidebar card to a highlighted style. Clearing
+// hover reverts smoothly.
+const HOVER_ACCENT_HEX = 0xffae00;
+const HOVER_ACCENT_CSS = '#ffae00';
+let _hoveredRoomId = null;
+function setHoveredRoom(roomId) {
+  if (_hoveredRoomId === roomId) return;
+  _hoveredRoomId = roomId || null;
+  // Repaint sidebar card highlight
+  try {
+    document.querySelectorAll('[data-room-id]').forEach(el => {
+      if (el.getAttribute('data-room-id') === _hoveredRoomId) {
+        el.classList.add('room-hover');
+      } else {
+        el.classList.remove('room-hover');
+      }
+    });
+  } catch { /* DOM not ready */ }
+}
+
 // ── Pre-allocated temp vectors for animate loop (zero GC pressure) ──
 const _tmpMid     = new THREE.Vector3();
 const _tmpMid2    = new THREE.Vector3();
@@ -1610,61 +1779,98 @@ function undulateCore(time) {
 }
 
 // ── TextSprite — dynamically sized text display for bubble surface messages ──
+// Ported visual style from noclip-unified/earth LabelSystem:
+//  - Oversampled canvas (2x logical → crisp downscale)
+//  - Exact content dimensions (NO power-of-2 padding — previously made
+//    sprites 40% dead space, which shrank the visible text under the
+//    viewport-stable scaler so labels read as illegible squiggles)
+//  - White pill background + left accent bar
+//  - Aspect preserved through sprite.scale via _canvasW/_canvasH
 function TextSprite(text, opts = {}) {
-  const fontSize = opts.fontSize || 14;
-  const fontStr = (opts.bold ? 'bold ' : '') + fontSize + 'px Courier New';
-  const pad = 24;      // horizontal padding (12px each side)
-  const pillPad = 10;  // vertical padding in pill
-  const maxChars = opts.maxChars || 120;
+  const DPR = 2; // oversample factor — crisp at any distance
+  const fontSize = (opts.fontSize || 18) * DPR;
+  const fontStr = (opts.bold ? 'bold ' : '') + fontSize + "px 'Courier New', monospace";
+  const padX = 18 * DPR;  // horizontal inset
+  const padY = 10 * DPR;  // vertical inset
+  const accentW = 4 * DPR;
+  const maxChars = opts.maxChars || 140;
 
-  // Truncate long text before measuring
   let display = text.length > maxChars ? text.slice(0, maxChars - 3) + '...' : text;
 
-  // Measure text on a temp canvas to get actual width
+  // Measure on a temp canvas to get exact pixel dimensions
   const measure = document.createElement('canvas').getContext('2d');
   measure.font = fontStr;
-  const measured = measure.measureText(display).width;
+  const metrics = measure.measureText(display);
+  const textW = Math.ceil(metrics.width);
+  const textH = Math.ceil(fontSize * 1.15);
 
-  // Size canvas to fit content — power-of-2 friendly, min 128, max 2048
-  const pillH = fontSize + pillPad;
-  const neededW = Math.ceil(measured + pad + 8);
-  const neededH = pillH + 16;
+  // Canvas = exactly content-sized (no nextPow2 — that was the bug)
   const cv = document.createElement('canvas');
-  cv.width  = Math.min(2048, Math.max(128, nextPow2(neededW)));
-  cv.height = Math.min(128, Math.max(32, nextPow2(neededH)));
+  cv.width  = textW + padX * 2 + accentW + 2;
+  cv.height = textH + padY * 2 + 2;
 
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.font = fontStr;
 
-  // Draw pill background sized to actual text
-  const pillW = Math.min(measured + pad, cv.width - 8);
-  const pillY = (cv.height - pillH) / 2;
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  // Semi-opaque black pill with rounded corners — matches the earth style
+  const radius = 8 * DPR;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
   if (ctx.roundRect) {
     ctx.beginPath();
-    ctx.roundRect(4, pillY, pillW, pillH, 4);
+    ctx.roundRect(1, 1, cv.width - 2, cv.height - 2, radius);
     ctx.fill();
   } else {
-    ctx.fillRect(4, pillY, pillW, pillH);
+    ctx.fillRect(1, 1, cv.width - 2, cv.height - 2);
+  }
+  // Thin white border
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.lineWidth = 2 * DPR;
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(1, 1, cv.width - 2, cv.height - 2, radius);
+    ctx.stroke();
+  }
+  // Left accent bar (white by default; callers pass opts.accentColor)
+  ctx.fillStyle = opts.accentColor || 'rgba(255, 255, 255, 0.85)';
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(3, padY, accentW, cv.height - padY * 2, [radius, 0, 0, radius]);
+    ctx.fill();
+  } else {
+    ctx.fillRect(3, padY, accentW, cv.height - padY * 2);
   }
 
-  ctx.fillStyle = opts.color || 'rgba(255,255,255,0.95)';
+  // Primary text
+  ctx.font = fontStr;
+  ctx.fillStyle = opts.color || 'rgba(255, 255, 255, 0.98)';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(display, 12, cv.height / 2);
+  ctx.fillText(display, padX + accentW, cv.height / 2);
 
   const tex = new THREE.CanvasTexture(cv);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  const spr = new THREE.Sprite(mat);
+  tex.minFilter = THREE.LinearFilter; // avoid mipmap blur on non-POT
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
 
-  // Scale sprite proportionally to canvas aspect ratio
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false, // always draw on top — labels are UI, not world geometry
+    sizeAttenuation: true,
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.renderOrder = 900; // above scene, below modal (modal is DOM)
+
+  // Placeholder world-space scale; animate loop replaces this each frame
+  // with applyViewportStableScale(). Content-exact canvas means the
+  // aspect ratio is preserved with no dead space.
   const aspect = cv.width / cv.height;
   const baseH = opts.scaleY || 0.44;
   spr.scale.set(baseH * aspect, baseH, 1);
-  spr._textWidth = pillW;  // expose for layout
+  spr._textWidth = cv.width - 2;
   spr._canvasW = cv.width;
-  spr._canvasH = cv.height;   // needed by applyViewportStableScale
+  spr._canvasH = cv.height;   // consumed by applyViewportStableScale
   return spr;
 }
 
@@ -1675,28 +1881,11 @@ function nextPow2(v) {
 }
 
 function makeLabelSprite(text) {
-  const fontStr = 'bold 18px Courier New';
-  const measure = document.createElement('canvas').getContext('2d');
-  measure.font = fontStr;
-  const measured = measure.measureText(text).width;
-
-  const cv  = document.createElement('canvas');
-  cv.width  = Math.min(1024, Math.max(64, nextPow2(Math.ceil(measured + 32))));
-  cv.height = 48;
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.font      = fontStr;
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.textAlign = 'center';
-  ctx.fillText(text, cv.width / 2, 30);
-  const tex = new THREE.CanvasTexture(cv);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  const spr = new THREE.Sprite(mat);
-  const aspect = cv.width / cv.height;
-  spr.scale.set(0.38 * aspect, 0.38, 1);
-  spr._canvasW = cv.width;
-  spr._canvasH = cv.height;   // consumed by applyViewportStableScale
-  return spr;
+  // Delegate to TextSprite so node labels get the same content-exact
+  // canvas sizing, oversampling, pill background, and viewport-stable
+  // scaling as every other label in the scene. Prevents the squished /
+  // illegible output that power-of-2 canvas padding used to produce.
+  return TextSprite(text, { fontSize: 18, bold: true });
 }
 
 function addNode(label, index, total, isAgent) {
@@ -1865,16 +2054,26 @@ function buildConnections() {
 //  ROOM BUBBLE MANAGEMENT
 // ─────────────────────────────────────────────
 function updateRoomBubbles() {
-  // Collect room memberships from knownAgents
-  const roomMembers = new Map(); // roomId -> [{ peerId, nodeIndex }]
+  // Collect room memberships from knownAgents.
+  //
+  // Split into PRIMARY (agent's first room — anchors the real node here)
+  // and GHOST (every subsequent room — rendered as a projected copy so
+  // the room has a visible seat without pulling the real node across
+  // the scene). Rooms compute their centroid from primary members only,
+  // which is why rooms no longer overlap when agents join multiple.
+  const roomMembers = new Map();       // roomId -> [{ peerId, nodeIndex, isPrimary }]
   for (const [peerId, agent] of knownAgents) {
     const nd = nodes[agent.index];
     if (!nd || nd.fadeOpacity < 0.1) continue; // skip faded nodes
     const rooms = agent.data?.rooms || [];
-    for (const roomId of rooms) {
+    rooms.forEach((roomId, ri) => {
       if (!roomMembers.has(roomId)) roomMembers.set(roomId, []);
-      roomMembers.get(roomId).push({ peerId, nodeIndex: agent.index });
-    }
+      roomMembers.get(roomId).push({
+        peerId,
+        nodeIndex: agent.index,
+        isPrimary: ri === 0,
+      });
+    });
   }
 
   // Create/update bubbles for rooms with 1+ visible members
@@ -1958,7 +2157,11 @@ function updateRoomBubbles() {
         mesh,
         wireMesh,
         labelSprite,
-        members: new Map(members.map(m => [m.peerId, m.nodeIndex])),
+        // .members = every agent in the room (primary + ghost)
+        // .primaryMembers = only agents whose first room is this one
+        // Centroid is computed from primaryMembers to keep rooms apart.
+        members:        new Map(members.map(m => [m.peerId, m.nodeIndex])),
+        primaryMembers: new Map(members.filter(m => m.isPrimary).map(m => [m.peerId, m.nodeIndex])),
         messages: [],
         messageSprites: [],
         umbilical: { line: umbLine, curve: umbCurve, particles: umbParticles },
@@ -1972,6 +2175,7 @@ function updateRoomBubbles() {
     } else {
       const bubble = roomBubbles.get(roomId);
       bubble.members = new Map(members.map(m => [m.peerId, m.nodeIndex]));
+      bubble.primaryMembers = new Map(members.filter(m => m.isPrimary).map(m => [m.peerId, m.nodeIndex]));
       // Adapt geometry detail if member count changed tier
       const newDetail = getRoomDetail(members.length);
       if (bubble._detail !== newDetail) {
@@ -1993,6 +2197,11 @@ function updateRoomBubbles() {
       archiveRoom(roomId);
     }
   }
+
+  // Spawn / retire ghost meshes + superposition lines for agents whose
+  // room membership just changed. Runs on every membership update so
+  // the ghost graph always matches the live room map.
+  rebuildSuperposition();
 }
 
 function removeBubble(roomId) {
@@ -2036,28 +2245,14 @@ function removeBubble(roomId) {
 }
 
 function makeRoomLabel(roomId) {
-  const fontStr = 'bold 16px Courier New';
-  const measure = document.createElement('canvas').getContext('2d');
-  measure.font = fontStr;
-  const measured = measure.measureText(roomId).width;
-
-  const cv = document.createElement('canvas');
-  cv.width  = Math.min(1024, Math.max(64, nextPow2(Math.ceil(measured + 32))));
-  cv.height = 48;
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.font = fontStr;
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.textAlign = 'center';
-  ctx.fillText(roomId, cv.width / 2, 30);
-  const tex = new THREE.CanvasTexture(cv);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  const spr = new THREE.Sprite(mat);
-  const aspect = cv.width / cv.height;
-  spr.scale.set(0.47 * aspect, 0.47, 1);
-  spr._canvasW = cv.width;
-  spr._canvasH = cv.height;   // consumed by applyViewportStableScale
-  return spr;
+  // Same content-exact TextSprite path as every other label in the
+  // scene. Room labels get a slightly bigger font and a gold accent
+  // bar so they're distinguishable from agent/post labels.
+  return TextSprite(roomId.toUpperCase(), {
+    fontSize: 20,
+    bold: true,
+    accentColor: 'rgba(255, 174, 0, 0.9)', // OA gold accent on the left edge
+  });
 }
 
 function makeChatSprite(text) {
@@ -2333,31 +2528,50 @@ function stepSimulation() {
     }
   }
 
-  // 3.5. Room clustering — pull members into polyp clusters, push cluster outward
+  // 3.5. Room clustering — pull PRIMARY members into polyp clusters, push
+  // cluster outward, and apply a room-vs-room repulsion so rooms never
+  // overlap. Only primary members get pulled so a multi-room agent's
+  // real node isn't tug-of-war'd between all the rooms they belong to.
+  const _roomCentroids = []; // [{ centroid: Vector3, radius: number, members: Map }]
   for (const [, bubble] of roomBubbles) {
-    if (bubble.members.size < 1) continue;
+    const primaryMap = bubble.primaryMembers || bubble.members;
+    if (primaryMap.size < 1) continue;
 
-    // Compute room centroid
+    // Compute room centroid from primary members only
     _tmpCentroid.set(0, 0, 0);
     let memberCount = 0;
-    for (const [, nodeIndex] of bubble.members) {
+    let maxR = 0;
+    for (const [, nodeIndex] of primaryMap) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
       _tmpCentroid.add(nd.pos);
       memberCount++;
     }
-    if (memberCount < 2) continue;
+    if (memberCount < 1) continue;
     _tmpCentroid.divideScalar(memberCount);
-
-    // Pull each member toward room centroid (clustering force)
-    for (const [, nodeIndex] of bubble.members) {
+    for (const [, nodeIndex] of primaryMap) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
-      _tmpDelta.subVectors(_tmpCentroid, nd.pos);
-      const dist = _tmpDelta.length();
-      if (dist > 0.1) {
-        _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(ROOM_SIM.CLUSTER_PULL * dist);
-        nd._force.add(_tmpForce);
+      const d = _tmpCentroid.distanceTo(nd.pos);
+      if (d > maxR) maxR = d;
+    }
+    _roomCentroids.push({
+      centroid: _tmpCentroid.clone(),
+      radius:   maxR + 2.0,
+      members:  primaryMap,
+    });
+
+    // Pull each primary member toward room centroid (clustering force)
+    if (memberCount >= 2) {
+      for (const [, nodeIndex] of primaryMap) {
+        const nd = nodes[nodeIndex];
+        if (!nd) continue;
+        _tmpDelta.subVectors(_tmpCentroid, nd.pos);
+        const dist = _tmpDelta.length();
+        if (dist > 0.1) {
+          _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(ROOM_SIM.CLUSTER_PULL * dist);
+          nd._force.add(_tmpForce);
+        }
       }
     }
 
@@ -2366,11 +2580,39 @@ function stepSimulation() {
     if (centroidDist > 0.1 && centroidDist < ROOM_SIM.POLYP_DIST) {
       _tmpDir.copy(_tmpCentroid).normalize();
       const pushMag = (ROOM_SIM.POLYP_DIST - centroidDist) * ROOM_SIM.OUTWARD_PUSH;
-      for (const [, nodeIndex] of bubble.members) {
+      for (const [, nodeIndex] of primaryMap) {
         const nd = nodes[nodeIndex];
         if (!nd) continue;
         _tmpForce.copy(_tmpDir).multiplyScalar(pushMag);
         nd._force.add(_tmpForce);
+      }
+    }
+  }
+
+  // 3.6. Room-vs-room repulsion — rooms never overlap. When two room
+  // centroids are closer than (rA + rB) * 1.15 we push every primary
+  // member of each room apart along the centroid-to-centroid vector.
+  // This is what breaks up the overlap the user reported.
+  const NO_OVERLAP_PAD = 1.15;
+  const ROOM_REPULSION = 0.04;
+  for (let i = 0; i < _roomCentroids.length; i++) {
+    for (let j = i + 1; j < _roomCentroids.length; j++) {
+      const a = _roomCentroids[i];
+      const b = _roomCentroids[j];
+      _tmpDelta.subVectors(b.centroid, a.centroid);
+      const d = _tmpDelta.length();
+      const minSep = (a.radius + b.radius) * NO_OVERLAP_PAD;
+      if (d >= minSep || d < 0.01) continue;
+      const overlap = minSep - d;
+      _tmpForce.copy(_tmpDelta).normalize().multiplyScalar(overlap * ROOM_REPULSION);
+      // Push a's members in -direction, b's members in +direction
+      for (const [, idx] of a.members) {
+        const nd = nodes[idx];
+        if (nd) nd._force.sub(_tmpForce);
+      }
+      for (const [, idx] of b.members) {
+        const nd = nodes[idx];
+        if (nd) nd._force.add(_tmpForce);
       }
     }
   }
@@ -2500,6 +2742,40 @@ function tweenCameraToCenter() {
   lockedNodeIdx = null;
   tweenCameraTo(new THREE.Vector3(0, 4, 22), new THREE.Vector3(0, 0, 0), 800);
 }
+
+// Canvas pointermove → raycast against room bubble meshes. If the
+// cursor is over a room, promote it to the hovered room; otherwise
+// clear hover. Sidebar hover is handled by mouseenter/mouseleave on
+// each card; the two paths feed the same setHoveredRoom() setter.
+const _hoverRaycaster = new THREE.Raycaster();
+const _hoverPick      = new THREE.Vector2();
+let _hoverSampleMs    = 0;
+canvas.addEventListener('pointermove', (e) => {
+  const now = performance.now();
+  if (now - _hoverSampleMs < 40) return; // throttle to ~25fps
+  _hoverSampleMs = now;
+  const rect = canvas.getBoundingClientRect();
+  _hoverPick.x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
+  _hoverPick.y = ((e.clientY - rect.top)  / rect.height) * -2 + 1;
+  _hoverRaycaster.setFromCamera(_hoverPick, camera);
+  // Collect bubble meshes into a single array (small — at most a few
+  // dozen rooms) and pick the nearest hit.
+  const meshes = [];
+  for (const [rid, bubble] of roomBubbles) {
+    if (bubble && bubble.mesh) {
+      bubble.mesh.userData.roomId = rid;
+      meshes.push(bubble.mesh);
+    }
+  }
+  if (meshes.length === 0) { setHoveredRoom(null); return; }
+  const hits = _hoverRaycaster.intersectObjects(meshes, false);
+  if (hits.length > 0) {
+    setHoveredRoom(hits[0].object.userData.roomId);
+  } else {
+    setHoveredRoom(null);
+  }
+});
+canvas.addEventListener('pointerleave', () => setHoveredRoom(null));
 
 canvas.addEventListener('pointerdown', (e) => {
   lastInteract = performance.now();
@@ -2784,18 +3060,33 @@ function animate() {
       nd.mat.emissiveIntensity = (nd._isAgent ? 0.8 : 0.1) * opacity;
     }
 
-    // Voice activity pulse — look up this node's peerId in _voiceActive
-    // and add an emissive boost that decays over VOICE_ACTIVE_MS. This
-    // makes the speaker's node visibly glow while their audio plays.
-    if (nd._isAgent && _voiceActive.size > 0) {
-      // Find peerId by reverse lookup against knownAgents (nodes only
-      // store a label, not the peerId directly). Cache on the node.
+    // Voice activity pulse + spatial panner update — look up this node's
+    // peerId in _voiceActive and (a) add an emissive boost that decays
+    // over VOICE_ACTIVE_MS, (b) move the peer's PannerNode to match the
+    // node's world-space position so the playback spatializes correctly
+    // as the camera moves.
+    if (nd._isAgent) {
       if (!nd._peerIdCached) {
         for (const [pid, entry] of knownAgents) {
           if (entry.index === nodes.indexOf(nd)) { nd._peerIdCached = pid; break; }
         }
       }
       if (nd._peerIdCached) {
+        // Update spatial panner position even when silent — ensures the
+        // next frame of incoming audio already has the right position
+        // and we don't hear a pop at the start of each utterance.
+        const peer = _voicePeers.get(nd._peerIdCached);
+        if (peer && peer.panner) {
+          try {
+            if (peer.panner.positionX) {
+              peer.panner.positionX.setValueAtTime(nd.mesh.position.x, _voiceCtx.currentTime);
+              peer.panner.positionY.setValueAtTime(nd.mesh.position.y, _voiceCtx.currentTime);
+              peer.panner.positionZ.setValueAtTime(nd.mesh.position.z, _voiceCtx.currentTime);
+            } else if (peer.panner.setPosition) {
+              peer.panner.setPosition(nd.mesh.position.x, nd.mesh.position.y, nd.mesh.position.z);
+            }
+          } catch { /* audio ctx may be closed */ }
+        }
         const lastMs = _voiceActive.get(nd._peerIdCached);
         if (lastMs) {
           const age = Date.now() - lastMs;
@@ -2937,34 +3228,60 @@ function animate() {
 
   // ── Update room bubbles ──
   roomBubbles.forEach((bubble, roomId) => {
-    if (bubble.members.size < 1) return;
-
-    // Compute centroid from member nodes — creator (first member) is anchored at center
+    // Compute centroid from PRIMARY members only — agents whose first
+    // room is this one. Ghost/secondary members do NOT contribute to
+    // the centroid because they're projected into this room from
+    // elsewhere; letting them pull the centroid would reintroduce the
+    // overlap bug. Creator is still the first primary member.
     _tmpCentroid.set(0, 0, 0);
     let count = 0;
     let maxDist = 0;
     let creatorIdx = -1;
 
-    for (const [, nodeIndex] of bubble.members) {
+    const primaryMap = bubble.primaryMembers || bubble.members;
+    for (const [, nodeIndex] of primaryMap) {
       const nd = nodes[nodeIndex];
       if (!nd) continue;
-      if (creatorIdx === -1) creatorIdx = nodeIndex; // first member = creator
+      if (creatorIdx === -1) creatorIdx = nodeIndex;
       _tmpCentroid.add(nd.pos);
       count++;
     }
 
-    if (count < 1) return;
-    _tmpCentroid.divideScalar(count);
-
-    for (const [, nodeIndex] of bubble.members) {
-      const nd = nodes[nodeIndex];
-      if (!nd) continue;
-      const dist = _tmpCentroid.distanceTo(nd.pos);
-      if (dist > maxDist) maxDist = dist;
+    if (count >= 1) {
+      _tmpCentroid.divideScalar(count);
+      for (const [, nodeIndex] of primaryMap) {
+        const nd = nodes[nodeIndex];
+        if (!nd) continue;
+        const dist = _tmpCentroid.distanceTo(nd.pos);
+        if (dist > maxDist) maxDist = dist;
+      }
+      // Cache the last-known centroid + spread so archived rooms can
+      // keep rendering at their final live location even after every
+      // member disconnects.
+      bubble._lastCentroid = bubble._lastCentroid || new THREE.Vector3();
+      bubble._lastCentroid.copy(_tmpCentroid);
+      bubble._lastMaxDist = maxDist;
+    } else {
+      // Archived / empty — fall back to the cached geometry so the
+      // bubble remains on-screen and hoverable until its 7d TTL.
+      if (bubble._lastCentroid) {
+        _tmpCentroid.copy(bubble._lastCentroid);
+        maxDist = bubble._lastMaxDist || 2.0;
+      } else {
+        return; // never had any members — nothing to render yet
+      }
     }
 
-    // Bubble radius with padding
-    const radius = maxDist + 1.8;
+    // Hover lerp: cleanly grow / shrink the bubble and tint its
+    // wireframe to #ffae00 when the user hovers this room.
+    bubble._hoverAmount = bubble._hoverAmount || 0;
+    const target = (_hoveredRoomId === (bubble._roomId || roomId)) ? 1.0 : 0.0;
+    bubble._hoverAmount += (target - bubble._hoverAmount) * 0.18;
+    const hover = bubble._hoverAmount;
+    const hoverScale = 1.0 + hover * 0.35;
+
+    // Bubble radius with padding (hover pushes outward for a clean expansion)
+    const radius = (maxDist + 1.8) * hoverScale;
 
     // ── Oblate node-driven envelope ──
     // Displace each vertex radially based on proximity to internal nodes.
@@ -3029,10 +3346,32 @@ function animate() {
     bubble.mesh.geometry.computeVertexNormals();
     // Wireframe shares geometry — already updated
 
+    // Hover tint: lerp the wireframe color from its resting grey toward
+    // #ffae00 and boost its opacity. Reverts smoothly when unhovered
+    // because bubble._hoverAmount is a running lerp.
+    if (bubble.wireMesh && bubble.wireMesh.material) {
+      const wm = bubble.wireMesh.material;
+      if (!bubble._wireBaseColor) {
+        bubble._wireBaseColor = wm.color.clone();
+        bubble._wireBaseOpacity = wm.opacity;
+      }
+      wm.color.copy(bubble._wireBaseColor).lerp(new THREE.Color(HOVER_ACCENT_HEX), hover);
+      wm.opacity = bubble._wireBaseOpacity + (0.55 - bubble._wireBaseOpacity) * hover;
+    }
+    // Bubble mesh emissive also warms up on hover for the "light up"
+    // feeling — without this the wireframe change alone reads as subtle
+    if (bubble.mesh && bubble.mesh.material) {
+      const bm = bubble.mesh.material;
+      if (!bubble._meshBaseOpacity) bubble._meshBaseOpacity = bm.opacity;
+      bm.emissive.setHex(0x000000).lerp(new THREE.Color(HOVER_ACCENT_HEX), hover * 0.5);
+      bm.emissiveIntensity = 0.25 + hover * 0.9;
+      bm.opacity = bubble._meshBaseOpacity + hover * 0.12;
+    }
+
     // Room label above the bubble
     bubble.labelSprite.position.copy(_tmpCentroid);
     bubble.labelSprite.position.y += radius + 0.6;
-    bubble.labelSprite.material.opacity = 0.4;
+    bubble.labelSprite.material.opacity = 0.4 + hover * 0.5;
 
     // Umbilical spline: curved cord from origin to room creator node
     if (bubble.umbilical) {
@@ -3188,8 +3527,91 @@ function animate() {
     }
   });
 
+  // ── Ghost agents + superposition lines ──
+  // After bubbles have positioned themselves, place each ghost mesh
+  // inside its room at an angular slot around the room's centroid,
+  // then stitch the real node and every ghost together with a white
+  // emissive polyline. The line visually represents the agent being
+  // "in superposition" across multiple rooms simultaneously.
+  for (const [peerId, ghosts] of agentGhosts) {
+    const agent = knownAgents.get(peerId);
+    if (!agent) continue;
+    const realNode = nodes[agent.index];
+    if (!realNode) continue;
+
+    // Position each ghost around its room's centroid at a unique angle
+    ghosts.forEach((g, gi) => {
+      const bubble = roomBubbles.get(g.roomId);
+      if (!bubble || !bubble._lastCentroid) return;
+      const radius = (bubble._lastMaxDist || 2) + 1.2;
+      const theta = ((peerId.charCodeAt(0) || 0) * 0.37 + gi * 2.1 + now * 0.0004) % (Math.PI * 2);
+      const phi   = Math.acos(1 - 2 * (((peerId.charCodeAt(1) || 0) + gi) % 17) / 17);
+      g.targetPos.set(
+        bubble._lastCentroid.x + Math.sin(phi) * Math.cos(theta) * radius * 0.75,
+        bubble._lastCentroid.y + Math.cos(phi) * radius * 0.75,
+        bubble._lastCentroid.z + Math.sin(phi) * Math.sin(theta) * radius * 0.75,
+      );
+      // Smooth lerp toward target
+      g.pos.lerp(g.targetPos, 0.10);
+      g.mesh.position.copy(g.pos);
+      // Match the real node's scale + opacity hints so the ghost reads
+      // as an echo, not a second independent agent
+      const fade = realNode.fadeOpacity || 1;
+      g.mesh.material.opacity = 0.4 + fade * 0.25;
+      g.mesh.scale.setScalar(0.75 * (realNode._currentScale || 1));
+      // Gentle rotation wobble
+      g.mesh.rotation.y += 0.003;
+      g.mesh.rotation.x += 0.002;
+    });
+
+    // Rebuild the superposition polyline: real node → ghost[0] → ghost[1] …
+    const line = superposLines.get(peerId);
+    if (line) {
+      const attr = line.geometry.attributes.position;
+      attr.setXYZ(0, realNode.pos.x, realNode.pos.y, realNode.pos.z);
+      for (let i = 0; i < ghosts.length; i++) {
+        const g = ghosts[i];
+        attr.setXYZ(i + 1, g.pos.x, g.pos.y, g.pos.z);
+      }
+      attr.needsUpdate = true;
+      line.geometry.computeBoundingSphere();
+      // Pulse the line brightness with a slow sine so it reads as
+      // "active" rather than a static connector
+      const pulse = 0.6 + 0.4 * Math.sin(now * 0.004 + peerId.charCodeAt(0));
+      line.material.opacity = 0.55 + pulse * 0.35;
+    }
+  }
+
   // ── Undulate core icosahedron with scene activity ──
   undulateCore(now);
+
+  // ── Spatial audio: keep the Web Audio listener aligned with the
+  // three.js camera so panned voices move relative to head position.
+  if (_voiceCtx && _voiceCtx.listener) {
+    try {
+      const L = _voiceCtx.listener;
+      const cp = camera.position;
+      // Forward vector: pointing toward controls.target
+      _tmpDir.copy(controls.target).sub(cp).normalize();
+      // Up vector: camera world up (Y by default)
+      _tmpOffset.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      if (L.positionX) {
+        const t = _voiceCtx.currentTime;
+        L.positionX.setValueAtTime(cp.x, t);
+        L.positionY.setValueAtTime(cp.y, t);
+        L.positionZ.setValueAtTime(cp.z, t);
+        L.forwardX.setValueAtTime(_tmpDir.x, t);
+        L.forwardY.setValueAtTime(_tmpDir.y, t);
+        L.forwardZ.setValueAtTime(_tmpDir.z, t);
+        L.upX.setValueAtTime(_tmpOffset.x, t);
+        L.upY.setValueAtTime(_tmpOffset.y, t);
+        L.upZ.setValueAtTime(_tmpOffset.z, t);
+      } else if (L.setPosition) {
+        L.setPosition(cp.x, cp.y, cp.z);
+        L.setOrientation(_tmpDir.x, _tmpDir.y, _tmpDir.z, _tmpOffset.x, _tmpOffset.y, _tmpOffset.z);
+      }
+    } catch { /* ignore */ }
+  }
 
   controls.update();
   composer.render();
@@ -4467,6 +4889,13 @@ function updateRoomsDropdown() {
     card.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' || ev.key === ' ') open(ev);
     });
+    // Hover = spotlight this room: sidebar card goes gold + the 3D
+    // bubble's wireframe flips to #ffae00 and the icosahedron expands
+    // cleanly via the animate loop's hover lerp.
+    card.addEventListener('mouseenter', () => setHoveredRoom(roomId));
+    card.addEventListener('mouseleave', () => setHoveredRoom(null));
+    card.addEventListener('focus',      () => setHoveredRoom(roomId));
+    card.addEventListener('blur',       () => setHoveredRoom(null));
     // Mic button toggles streaming for this room. Clicking the same
     // room's mic again stops the stream; clicking a different room
     // switches the target.

@@ -1,7 +1,7 @@
 {
   "name": "open-agents-nexus",
   "version": "1.17.3",
-  "description": "Zero-config decentralized agent-to-agent communication. Agents npm install, connect, and talk — no servers, no accounts, no surveillance. Built on libp2p + IPFS with encrypted P2P mesh networking, viral content pinning, and automatic peer discovery.",
+  "description": "Zero-config decentralized agent-to-agent communication. Agents npm install, connect, and talk \u2014 no servers, no accounts, no surveillance. Built on libp2p + IPFS with encrypted P2P mesh networking, viral content pinning, and automatic peer discovery.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -29,13 +29,16 @@
   ],
   "scripts": {
     "dev": "node --import tsx src/index.ts",
-    "prebuild": "rm -rf dist *.tsbuildinfo",
+    "prebuild": "rm -rf dist *.tsbuildinfo && node scripts/sync-html.mjs",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "sync-html": "node scripts/sync-html.mjs",
+    "predeploy": "node scripts/sync-html.mjs",
+    "deploy": "wrangler deploy"
   },
   "engines": {
     "node": ">=22.0.0"

@@ -1275,6 +1275,262 @@ function applyViewportStableScale(sprite, distance, targetPx = LABEL_TARGET_PX) 
   sprite.scale.set(scaleY * aspect, scaleY, 1);
 }
 
+// ── Room voice audio — PCM relay over NATS for live agent conversations ──
+// Agents in a room publish PCM chunks to `nexus.rooms.audio`; the nexus
+// frontend subscribes, decodes, and plays each peer's stream via Web Audio
+// with a tiny jitter buffer. Visitors automatically hear every speaking
+// agent in rooms. A `publishRoomAudio()` helper lets the visitor's own
+// microphone feed audio back into a room (push-to-talk sidebar button).
+const VOICE_SUBJECT       = 'nexus.rooms.audio';
+const VOICE_JITTER_S      = 0.08;   // 80ms of lead time before scheduled start
+const VOICE_SILENCE_TAIL  = 0.25;   // after this idle period, reset cursor
+const VOICE_ACTIVE_MS     = 800;    // visual "speaking" pulse window
+
+// Per-peer playback state: { cursor, audioCtx, lastChunkMs, sourceGain }
+const _voicePeers = new Map();
+// Per-peer recent activity for node pulsing: peerId → lastPlaybackMs
+const _voiceActive = new Map();
+let _voiceCtx = null; // shared AudioContext; created lazily to survive autoplay policy
+
+function _getVoiceCtx() {
+  if (_voiceCtx && _voiceCtx.state !== 'closed') return _voiceCtx;
+  try {
+    _voiceCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+    // Autoplay policy: resume on first user gesture if the context starts suspended.
+    if (_voiceCtx.state === 'suspended') {
+      const resume = () => {
+        _voiceCtx?.resume().catch(() => {});
+        window.removeEventListener('pointerdown', resume);
+        window.removeEventListener('keydown', resume);
+      };
+      window.addEventListener('pointerdown', resume, { once: true });
+      window.addEventListener('keydown',   resume, { once: true });
+    }
+  } catch {
+    _voiceCtx = null;
+  }
+  return _voiceCtx;
+}
+
+/** Decode a base64 string into a Uint8Array (browser-safe, no Buffer). */
+function _b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Encode a Uint8Array as base64 (browser-safe). Chunks to avoid stack blowout. */
+function _bytesToB64(bytes) {
+  const CHUNK = 0x8000;
+  let s = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(s);
+}
+
+/** Convert int16 PCM little-endian bytes → Float32 samples in [-1, 1]. */
+function _pcm16ToFloat32(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const n = bytes.length >> 1;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = view.getInt16(i * 2, true) / 32768;
+  }
+  return out;
+}
+
+/** Convert Float32 samples in [-1, 1] → int16 PCM little-endian bytes. */
+function _float32ToPcm16(f32) {
+  const out = new Uint8Array(f32.length * 2);
+  const view = new DataView(out.buffer);
+  for (let i = 0; i < f32.length; i++) {
+    let s = Math.max(-1, Math.min(1, f32[i]));
+    view.setInt16(i * 2, s < 0 ? s * 32768 : s * 32767, true);
+  }
+  return out;
+}
+
+/** Schedule a Float32 audio frame for immediate playback on a per-peer
+ *  continuous cursor. Called from the NATS voice subscription loop. */
+function _enqueuePeerAudio(peerId, float32, srcSampleRate) {
+  const ctx = _getVoiceCtx();
+  if (!ctx || !float32 || float32.length === 0) return;
+
+  // Build an AudioBuffer at the source sample rate — Web Audio will
+  // automatically resample on playback if srcSampleRate !== ctx.sampleRate.
+  const buffer = ctx.createBuffer(1, float32.length, Math.max(8000, srcSampleRate | 0));
+  buffer.getChannelData(0).set(float32);
+
+  let peer = _voicePeers.get(peerId);
+  if (!peer) {
+    const gain = ctx.createGain();
+    gain.gain.value = 1.0;
+    gain.connect(ctx.destination);
+    peer = { cursor: 0, gain, lastChunkMs: 0 };
+    _voicePeers.set(peerId, peer);
+  }
+
+  const now = ctx.currentTime;
+  // Reset the cursor if the peer has been silent too long (avoid runaway drift)
+  if (peer.cursor < now + 0.005 || (ctx.currentTime - peer.lastChunkMs / 1000) > VOICE_SILENCE_TAIL) {
+    peer.cursor = now + VOICE_JITTER_S;
+  }
+
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(peer.gain);
+  src.start(peer.cursor);
+  peer.cursor += buffer.duration;
+  peer.lastChunkMs = Date.now();
+  _voiceActive.set(peerId, Date.now());
+}
+
+/** Handle an incoming voice envelope from NATS. JSON-wrapped PCM over the
+ *  StringCodec transport, same pattern as nexus.rooms.chat but with
+ *  base64-encoded audio bytes. Returns true if it was a valid voice msg. */
+function handleVoiceEnvelope(envelope) {
+  if (!envelope || envelope.type !== 'voice' || !envelope.data) return false;
+  const peerId = envelope.peerId || 'anon';
+  const sr     = Number(envelope.sampleRate) || 16000;
+  const bytes  = _b64ToBytes(envelope.data);
+  let f32;
+  if (envelope.encoding === 'float32') {
+    f32 = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  } else {
+    // Default: pcm16 little-endian
+    f32 = _pcm16ToFloat32(bytes);
+  }
+  _enqueuePeerAudio(peerId, f32, sr);
+  return true;
+}
+
+// ── Visitor push-to-talk — mic → NATS pipeline ────────────────────────
+// A single active stream at a time. Clicking a room's mic icon starts
+// capture for that room; clicking again (or any other mic) stops it.
+const MIC_TARGET_SR = 16000;    // downsample target for transport
+const MIC_CHUNK_MS  = 100;       // frame size in ms
+let _micStream = null;           // active MediaStream
+let _micRoomId = null;           // room we're currently broadcasting to
+let _micCtx    = null;           // mic-side AudioContext (may differ from playback ctx)
+let _micSource = null;
+let _micProcessor = null;
+let _micGain   = null;
+let _micSeq    = 0;
+
+/** Resample a mono Float32 buffer from srcRate to dstRate using a simple
+ *  linear interpolator. Good enough for speech; cheap and fast. */
+function _resampleFloat32(input, srcRate, dstRate) {
+  if (srcRate === dstRate) return input;
+  const ratio = srcRate / dstRate;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const srcIdx = i * ratio;
+    const lo = Math.floor(srcIdx);
+    const hi = Math.min(input.length - 1, lo + 1);
+    const frac = srcIdx - lo;
+    out[i] = input[lo] * (1 - frac) + input[hi] * frac;
+  }
+  return out;
+}
+
+/** Start capturing the visitor's microphone and streaming PCM frames to
+ *  a room via NATS. Called from the sidebar PTT button. Idempotent — a
+ *  second call with a different roomId swaps the target without tearing
+ *  down the capture pipeline. */
+async function startMicStream(roomId, agentName = 'visitor') {
+  if (!roomId) return;
+  if (_micStream && _micRoomId === roomId) return; // already live on this room
+  if (_micStream) stopMicStream();
+  try {
+    _micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true },
+    });
+  } catch (err) {
+    pushLog('mic: <span style="color:#a66">denied or unavailable</span>');
+    _micStream = null;
+    return;
+  }
+  _micCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  _micSource = _micCtx.createMediaStreamSource(_micStream);
+  _micGain   = _micCtx.createGain();
+  _micGain.gain.value = 1.0;
+  // ScriptProcessorNode is deprecated but universally available; the
+  // AudioWorklet alternative needs an external worklet file which is
+  // awkward in a single-file app. Keeps the code in one place.
+  const bufferSize = Math.max(256, Math.min(16384, Math.round(_micCtx.sampleRate * MIC_CHUNK_MS / 1000)));
+  _micProcessor = _micCtx.createScriptProcessor(bufferSize, 1, 1);
+  _micSource.connect(_micProcessor);
+  _micProcessor.connect(_micGain);
+  _micGain.connect(_micCtx.destination); // route through silent-gain sink so processor fires
+  _micGain.gain.value = 0.0001;          // keep audible monitoring off
+
+  _micRoomId = roomId;
+  _micSeq = 0;
+  _micProcessor.onaudioprocess = (ev) => {
+    const raw = ev.inputBuffer.getChannelData(0);
+    // Downsample to 16kHz mono for transport efficiency
+    const resampled = _resampleFloat32(raw, _micCtx.sampleRate, MIC_TARGET_SR);
+    // Clone because getChannelData is a live reference reused next tick
+    const copy = new Float32Array(resampled);
+    publishRoomAudio(_micRoomId, copy, MIC_TARGET_SR, {
+      peerId:    'nexus-visitor',
+      agentName,
+      seq:       _micSeq++,
+    });
+  };
+  pushLog('mic: 🎙 streaming to <span class="log-room">' + roomId + '</span>');
+}
+
+function stopMicStream() {
+  try { _micProcessor?.disconnect(); } catch {}
+  try { _micSource?.disconnect(); } catch {}
+  try { _micGain?.disconnect(); } catch {}
+  try { _micCtx?.close(); } catch {}
+  if (_micStream) {
+    _micStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+  }
+  _micStream = null;
+  _micCtx    = null;
+  _micSource = null;
+  _micProcessor = null;
+  _micGain   = null;
+  _micRoomId = null;
+  pushLog('mic: stopped');
+}
+window.startMicStream = startMicStream;
+window.stopMicStream  = stopMicStream;
+
+/** Publish a PCM audio frame to a room. Works from the browser (visitor
+ *  push-to-talk) or from any tool calling into window.publishRoomAudio. */
+function publishRoomAudio(roomId, float32, sampleRate = 16000, meta = {}) {
+  const nc = window._natsConn;
+  const sc = window._natsCodec;
+  if (!nc || !sc || !roomId || !float32 || float32.length === 0) return false;
+  const pcm16 = _float32ToPcm16(float32);
+  const env = {
+    type:       'voice',
+    roomId,
+    peerId:     meta.peerId || 'nexus-visitor',
+    agentName:  meta.agentName || 'visitor',
+    sampleRate,
+    encoding:   'pcm16',
+    channels:   1,
+    seq:        (meta.seq != null) ? meta.seq : Date.now(),
+    timestamp:  Date.now(),
+    data:       _bytesToB64(pcm16),
+  };
+  try {
+    nc.publish(VOICE_SUBJECT, sc.encode(JSON.stringify(env)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+window.publishRoomAudio = publishRoomAudio;
+
 // ── Pre-allocated temp vectors for animate loop (zero GC pressure) ──
 const _tmpMid     = new THREE.Vector3();
 const _tmpMid2    = new THREE.Vector3();
@@ -2312,86 +2568,79 @@ function _formatAge(ms) {
  * Walks postStore to collect all posts in the room, groups by parentId
  * into a tree, and renders recursively with collapsible children.
  */
-function _renderThread(rootPostId) {
-  const root = postStore.get(rootPostId);
-  if (!root) {
-    return '<div class="pm-empty">post no longer in store (expired or gc\'d)</div>';
-  }
-
-  // Gather every post in the same room so sibling replies show up alongside
+/** Collect every post in a room from postStore and build a parentId map
+ *  so thread rendering and root discovery can share one scan. */
+function _collectRoomPosts(roomId) {
   const roomPosts = [];
   for (const p of postStore.values()) {
-    if (p.roomId === root.roomId) roomPosts.push(p);
+    if (p.roomId === roomId) roomPosts.push(p);
   }
   roomPosts.sort((a, b) => a.timestamp - b.timestamp);
-
-  // Build parentId → [children] map
   const byParent = new Map();
   for (const p of roomPosts) {
     const key = p.parentId || '__root__';
     if (!byParent.has(key)) byParent.set(key, []);
     byParent.get(key).push(p);
   }
+  return { roomPosts, byParent };
+}
 
-  // Identify which root we're displaying: the clicked post OR its ancestor
-  // chain's topmost node (so "open a reply" still shows the full thread).
+/** Recursive post renderer — shared by thread and room modal paths. */
+function _renderPostNode(post, depth, byParent, highlightId, now) {
+  const children = byParent.get(post.id) || [];
+  const hasKids = children.length > 0;
+  const toggle = hasKids
+    ? `<button class="pm-toggle" data-toggle="${_escHtml(post.id)}" type="button">[−]</button>`
+    : '<span class="pm-toggle"></span>';
+  const isHighlight = post.id === highlightId;
+  const rootClass = depth === 0 ? ' pm-root' : '';
+  const highlightStyle = isHighlight ? ' style="background: rgba(255,255,255,0.04);"' : '';
+  const childHtml = hasKids
+    ? `<div class="pm-children" data-children="${_escHtml(post.id)}">${children.map(c => _renderPostNode(c, depth + 1, byParent, highlightId, now)).join('')}</div>`
+    : '';
+  return `
+    <div class="pm-post${rootClass}"${highlightStyle}>
+      <div class="pm-post-head">
+        ${toggle}
+        <span class="pm-author">${_escHtml(post.agentName)}</span>
+        <span class="pm-time">${_escHtml(_formatAge(now - post.timestamp))}</span>
+      </div>
+      <div class="pm-content">${_escHtml(post.content)}</div>
+      ${childHtml}
+    </div>
+  `;
+}
+
+function _renderThread(rootPostId) {
+  const root = postStore.get(rootPostId);
+  if (!root) {
+    return '<div class="pm-empty">post no longer in store (expired or gc\'d)</div>';
+  }
+  const { byParent } = _collectRoomPosts(root.roomId);
+  // Walk up to the topmost ancestor so "open a reply" shows the full thread
   let threadRoot = root;
   while (threadRoot.parentId && postStore.has(threadRoot.parentId)) {
     threadRoot = postStore.get(threadRoot.parentId);
   }
-
-  const now = Date.now();
-  const highlightId = rootPostId;
-
-  function renderNode(post, depth) {
-    const children = byParent.get(post.id) || [];
-    const hasKids = children.length > 0;
-    const toggle = hasKids ? `<button class="pm-toggle" data-toggle="${_escHtml(post.id)}" type="button">[−]</button>` : '<span class="pm-toggle"></span>';
-    const isHighlight = post.id === highlightId;
-    const rootClass = depth === 0 ? ' pm-root' : '';
-    const highlightStyle = isHighlight ? ' style="background: rgba(255,255,255,0.04);"' : '';
-    const childHtml = hasKids
-      ? `<div class="pm-children" data-children="${_escHtml(post.id)}">${children.map(c => renderNode(c, depth + 1)).join('')}</div>`
-      : '';
-    return `
-      <div class="pm-post${rootClass}"${highlightStyle}>
-        <div class="pm-post-head">
-          ${toggle}
-          <span class="pm-author">${_escHtml(post.agentName)}</span>
-          <span class="pm-time">${_escHtml(_formatAge(now - post.timestamp))}</span>
-        </div>
-        <div class="pm-content">${_escHtml(post.content)}</div>
-        ${childHtml}
-      </div>
-    `;
-  }
-
-  return renderNode(threadRoot, 0);
+  return _renderPostNode(threadRoot, 0, byParent, rootPostId, Date.now());
 }
 
-function openPostModal(postId) {
-  const post = postStore.get(postId);
-  if (!post) return;
-
-  const room = roomStore.get(post.roomId);
-  _polypModalTitle.textContent = 'THREAD';
-  _polypModalRoom.textContent  = ' · ' + post.roomId;
-  _polypModalBody.innerHTML    = _renderThread(postId);
-
-  const totalInRoom = Array.from(postStore.values()).filter(p => p.roomId === post.roomId).length;
-  _polypModalMeta.textContent = totalInRoom + ' post' + (totalInRoom === 1 ? '' : 's') + ' in room';
-
-  if (room && room.archivedAt) {
-    const daysLeft = Math.max(0, Math.ceil((ROOM_ARCHIVE_TTL_MS - (Date.now() - room.archivedAt)) / (24 * 3600 * 1000)));
-    _polypModalArchived.textContent = '[ARCHIVED · ' + daysLeft + 'd LEFT]';
-    _polypModalArchived.style.display = '';
-  } else {
-    _polypModalArchived.style.display = 'none';
+/** Render every root thread in a room (multiple sibling threads). */
+function _renderRoomAllThreads(roomId) {
+  const { roomPosts, byParent } = _collectRoomPosts(roomId);
+  if (roomPosts.length === 0) {
+    return '<div class="pm-empty">no posts in this room yet — waiting for agents to speak</div>';
   }
+  // Roots = posts with no parentId, OR parentId points at a post not in store
+  const roots = roomPosts.filter(p => !p.parentId || !postStore.has(p.parentId));
+  if (roots.length === 0) return '<div class="pm-empty">thread roots missing (expired)</div>';
+  const now = Date.now();
+  return roots.map(r => _renderPostNode(r, 0, byParent, null, now)).join('<hr style="border:0;border-top:1px solid rgba(255,255,255,0.15);margin:12px 0;">');
+}
 
-  _polypModalBackdrop.classList.add('open');
-
-  // Wire collapsible toggles
+/** Attach collapsible toggle listeners inside the modal body. Called once
+ *  per modal open since the body innerHTML is replaced. */
+function _wireModalToggles() {
   _polypModalBody.querySelectorAll('[data-toggle]').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2402,6 +2651,46 @@ function openPostModal(postId) {
       btn.textContent = collapsed ? '[+]' : '[−]';
     });
   });
+}
+
+/** Set the archived / post-count footer for a given room. */
+function _setModalFooter(roomId) {
+  const room = roomStore.get(roomId);
+  const totalInRoom = Array.from(postStore.values()).filter(p => p.roomId === roomId).length;
+  _polypModalMeta.textContent = totalInRoom + ' post' + (totalInRoom === 1 ? '' : 's') + ' in room';
+  if (room && room.archivedAt) {
+    const daysLeft = Math.max(0, Math.ceil((ROOM_ARCHIVE_TTL_MS - (Date.now() - room.archivedAt)) / (24 * 3600 * 1000)));
+    _polypModalArchived.textContent = '[ARCHIVED · ' + daysLeft + 'd LEFT]';
+    _polypModalArchived.style.display = '';
+  } else {
+    _polypModalArchived.style.display = 'none';
+  }
+}
+
+function openPostModal(postId) {
+  const post = postStore.get(postId);
+  if (!post) return;
+  _polypModalTitle.textContent = 'THREAD';
+  _polypModalRoom.textContent  = ' · ' + post.roomId;
+  _polypModalBody.innerHTML    = _renderThread(postId);
+  _setModalFooter(post.roomId);
+  _polypModalBackdrop.classList.add('open');
+  _polypModalBody.scrollTop = 0;
+  _wireModalToggles();
+}
+
+/** Open the full room view — every root thread in the room rendered as
+ *  siblings, with the archive footer. This is what the sidebar room cards
+ *  invoke: "click room → see the full forum history for that room". */
+function openRoomModal(roomId) {
+  if (!roomId) return;
+  _polypModalTitle.textContent = 'ROOM';
+  _polypModalRoom.textContent  = ' · ' + roomId;
+  _polypModalBody.innerHTML    = _renderRoomAllThreads(roomId);
+  _setModalFooter(roomId);
+  _polypModalBackdrop.classList.add('open');
+  _polypModalBody.scrollTop = 0;
+  _wireModalToggles();
 }
 
 function closePostModal() {
@@ -2421,6 +2710,7 @@ window.addEventListener('keydown', (e) => {
 
 // Expose for debugging / programmatic open
 window.openPostModal = openPostModal;
+window.openRoomModal = openRoomModal;
 
 function animate() {
   requestAnimationFrame(animate);
@@ -2492,6 +2782,31 @@ function animate() {
       nd.mat.emissiveIntensity = (nd._isAgent ? 1.5 : 0.6) * Math.min(1, fade) * opacity;
     } else {
       nd.mat.emissiveIntensity = (nd._isAgent ? 0.8 : 0.1) * opacity;
+    }
+
+    // Voice activity pulse — look up this node's peerId in _voiceActive
+    // and add an emissive boost that decays over VOICE_ACTIVE_MS. This
+    // makes the speaker's node visibly glow while their audio plays.
+    if (nd._isAgent && _voiceActive.size > 0) {
+      // Find peerId by reverse lookup against knownAgents (nodes only
+      // store a label, not the peerId directly). Cache on the node.
+      if (!nd._peerIdCached) {
+        for (const [pid, entry] of knownAgents) {
+          if (entry.index === nodes.indexOf(nd)) { nd._peerIdCached = pid; break; }
+        }
+      }
+      if (nd._peerIdCached) {
+        const lastMs = _voiceActive.get(nd._peerIdCached);
+        if (lastMs) {
+          const age = Date.now() - lastMs;
+          if (age < VOICE_ACTIVE_MS) {
+            const pulse = 1.0 - age / VOICE_ACTIVE_MS;
+            nd.mat.emissiveIntensity += pulse * 1.8 * opacity;
+          } else {
+            _voiceActive.delete(nd._peerIdCached);
+          }
+        }
+      }
     }
 
     // Undulate agent icosahedron vertices — violent stretching like the central core
@@ -3982,6 +4297,27 @@ async function connectNats() {
       }
     })().catch(() => {});
 
+    // Subscribe to live voice PCM from agents speaking in rooms. Auto-
+    // plays every frame into Web Audio so visitors hear agent voices
+    // without any extra click or room join — just by loading the page.
+    // Participating agents can also consume this subject via their own
+    // NATS client to receive + ASR (handled by the CLI, not here).
+    const voiceSub = nc.subscribe(VOICE_SUBJECT);
+    (async () => {
+      for await (const msg of voiceSub) {
+        try {
+          const env = JSON.parse(sc.decode(msg.data));
+          if (!handleVoiceEnvelope(env)) continue;
+          // Keep room activity fresh so the sidebar count ticks and the
+          // bubble doesn't archive while voices are speaking.
+          if (env.roomId) {
+            touchRoom(env.roomId, env.peerId);
+          }
+          pushLog('<span class="log-highlight">' + (env.agentName || 'voice') + '</span> 🎙 in <span class="log-room">' + env.roomId + '</span>');
+        } catch { /* malformed voice frame — drop silently */ }
+      }
+    })().catch(() => {});
+
   } catch (err) {
     pushLog(`NATS: <span style="color:#666">${err.message || 'unavailable'}</span>`);
   }
@@ -4080,20 +4416,74 @@ function updateRoomsDropdown() {
     }
   }
 
+  // Merge rooms from persistent roomStore so archived rooms (spawner left,
+  // still within 7d TTL) are also listed and clickable in the sidebar.
+  for (const [rid, rec] of roomStore) {
+    if (!roomMap.has(rid)) roomMap.set(rid, []);
+  }
+
   for (const [roomId, members] of roomMap) {
     const card = document.createElement('div');
     card.className = 'peer-card';
     card.style.cursor = 'pointer';
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('data-room-id', roomId);
+    card.title = 'open thread history for ' + roomId;
+    // Visual cue for archived rooms
+    const rec = roomStore.get(roomId);
+    const isArchived = !!(rec && rec.archivedAt);
+    const postCount = Array.from(postStore.values()).filter(p => p.roomId === roomId).length;
+    const dotColor = isArchived ? '#555' : '#88aacc';
+    const metaLine = members.length > 0
+      ? (members.length + ' member' + (members.length !== 1 ? 's' : ''))
+      : (isArchived ? 'archived' : 'no live members');
+    const isMicLive = (_micRoomId === roomId);
+    const micLabel  = isMicLive ? '◉ mic' : '◎ mic';
+    const micColor  = isMicLive ? '#ffae00' : '#888';
     card.innerHTML = `
-      <div class="peer-name">
-        <div class="peer-dot" style="background:#667788;box-shadow:0 0 3px #667788"></div>
-        <div class="peer-name-text" style="font-size:10px">${roomId}</div>
+      <div class="peer-name" style="display:flex;align-items:center;gap:6px;">
+        <div class="peer-dot" style="background:${dotColor};box-shadow:0 0 3px ${dotColor}"></div>
+        <div class="peer-name-text" style="font-size:10px;flex:1;">${_escHtml(roomId)}${isArchived ? ' <span style="color:#666">[arch]</span>' : ''}</div>
+        <button class="room-mic-btn" data-room-mic="${_escHtml(roomId)}"
+          style="background:transparent;border:1px solid ${micColor};color:${micColor};font-family:var(--font);font-size:9px;padding:1px 5px;cursor:pointer;border-radius:2px;"
+          title="push-to-talk into ${_escHtml(roomId)}">${micLabel}</button>
       </div>
       <div class="peer-meta">
-        <div class="peer-meta-item">${members.length} member${members.length !== 1 ? 's' : ''}</div>
-        <div class="peer-meta-item" style="font-size:7px;color:#555">${members.join(', ')}</div>
+        <div class="peer-meta-item">${metaLine} · ${postCount} post${postCount !== 1 ? 's' : ''}</div>
+        <div class="peer-meta-item" style="font-size:7px;color:#555">${_escHtml(members.join(', ') || '—')}</div>
       </div>
     `;
+    // Click (and keyboard Enter/Space) opens the room forum modal.
+    const open = (ev) => {
+      // Mic button gets its own handler — don't open the modal on mic
+      // click because the button is inside the card's hit area.
+      if (ev.target && ev.target.closest && ev.target.closest('[data-room-mic]')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      openRoomModal(roomId);
+    };
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') open(ev);
+    });
+    // Mic button toggles streaming for this room. Clicking the same
+    // room's mic again stops the stream; clicking a different room
+    // switches the target.
+    const micBtn = card.querySelector('[data-room-mic]');
+    if (micBtn) {
+      micBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (_micRoomId === roomId) {
+          stopMicStream();
+        } else {
+          startMicStream(roomId);
+        }
+        // Repaint the dropdown so the mic button reflects the new state
+        setTimeout(updateRoomsDropdown, 50);
+      });
+    }
     list.appendChild(card);
   }
 

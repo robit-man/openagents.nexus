@@ -6,9 +6,9 @@
  * so the Cloudflare Worker picks up the latest frontend on the next
  * `wrangler deploy`.
  *
- * Lines: 5557
- * Bytes: 214533
- * Generated: 2026-04-08T21:01:13.919Z
+ * Lines: 5806
+ * Bytes: 224125
+ * Generated: 2026-04-09T04:37:24.762Z
  */
 export const INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -1282,13 +1282,21 @@ function archiveRoom(roomId) {
  * its on-screen height ≈ targetPx regardless of distance, preserving the
  * canvas aspect ratio. Fixes the "squished at angle / tiny at distance" bug
  * where callers hard-coded world-space sprite scales.
+ *
+ * Accepts an optional 4th arg for per-call clamp overrides:
+ *   applyViewportStableScale(sprite, dist, 80, { minPx: 20, maxPx: 140 })
+ * Multi-line labels (e.g. wrapped post bodies) need a larger ceiling than
+ * the default LABEL_MAX_PX=56 or all 8 body lines would be squeezed into
+ * 56 pixels and become unreadable.
  */
-function applyViewportStableScale(sprite, distance, targetPx = LABEL_TARGET_PX) {
+function applyViewportStableScale(sprite, distance, targetPx = LABEL_TARGET_PX, opts) {
   if (!sprite || !sprite.material) return;
   const h = window.innerHeight || 1;
   const fovRad = THREE.MathUtils.degToRad(camera.fov || 55);
   const unitsPerPixel = (2.0 * distance * Math.tan(fovRad * 0.5)) / h;
-  const clamped = Math.max(LABEL_MIN_PX, Math.min(LABEL_MAX_PX, targetPx));
+  const minPx = (opts && Number.isFinite(opts.minPx)) ? opts.minPx : LABEL_MIN_PX;
+  const maxPx = (opts && Number.isFinite(opts.maxPx)) ? opts.maxPx : LABEL_MAX_PX;
+  const clamped = Math.max(minPx, Math.min(maxPx, targetPx));
   let scaleY = unitsPerPixel * clamped;
   if (!Number.isFinite(scaleY) || scaleY <= 0) scaleY = 0.3;
   const cw = sprite._canvasW || 1;
@@ -2296,6 +2304,216 @@ function makeRoomLabel(roomId) {
   });
 }
 
+/**
+ * PostLabelSprite — two-layer label for room posts.
+ *
+ * Layout (top to bottom inside one canvas):
+ *   ┌───────────────────────────┐
+ *   │ ▎ AgentName:              │  ← header line, bold, name font size
+ *   │                           │
+ *   │ ▎ wrapped body line 1     │  ← body, smaller font (≈ half the
+ *   │ ▎ wrapped body line 2     │    size of the name header) — each
+ *   │ ▎ …                       │    line wraps at ~30 chars, no more
+ *   │ ▎ wrapped body line 8 …   │    than 8 lines total, ellipsis on
+ *   └───────────────────────────┘    overflow
+ *
+ * The name is NEVER concatenated with the body before wrapping —
+ * agent names stay on their own line so they don't get chopped
+ * mid-name, and body word-wrap starts fresh at column 0. This is
+ * the "careful with concat before wrap" rule.
+ *
+ * Canvas is content-exact (no power-of-2 padding) so the viewport-
+ * stable scaler hits the right pixel height on screen.
+ *
+ * Returns a THREE.Sprite with extra metadata:
+ *   _canvasW, _canvasH       — for aspect-preserving scale
+ *   _postLineCount           — number of body lines (0-8)
+ *   _postHeaderLines         — always 1 for now (room for future multi-line header)
+ *   _isPostLabel             — marker for the animate loop's size picker
+ */
+function PostLabelSprite(agentName, content, opts = {}) {
+  const DPR = 2;
+  // Name header at full (~14) size; body at HALF that (~8). User asked
+  // for "about half that of the name of the agents or rooms" — agent
+  // labels use fontSize 18, so the whole post label is scaled down
+  // via the smaller target pixel height set by the animate loop.
+  const nameFontSize = (opts.nameFontSize || 14) * DPR;
+  const bodyFontSize = (opts.bodyFontSize || 10) * DPR;
+  const maxCols = opts.maxCols || 30;
+  const maxLines = Math.max(1, Math.min(8, opts.maxLines || 8));
+  const padX = 12 * DPR;
+  const padY = 8 * DPR;
+  const accentW = 4 * DPR;
+  const lineGapY = 2 * DPR;
+  const headerBodyGap = 4 * DPR;
+
+  // Normalize inputs — keep the name intact (no wrapping, no splitting),
+  // normalise whitespace in the body so the wrapper gets a clean token
+  // stream to work with.
+  const nameStr = String(agentName || 'anon').slice(0, 60);
+  const bodyStrRaw = String(content || '').replace(/\\s+/g, ' ').trim();
+
+  // Greedy word wrap at maxCols chars. Overlong words get hard-split.
+  // Never wraps the name header — only the body.
+  const wrapped = [];
+  if (bodyStrRaw.length > 0) {
+    const words = bodyStrRaw.split(' ');
+    let line = '';
+    for (let wi = 0; wi < words.length; wi++) {
+      if (wrapped.length >= maxLines) break;
+      const word = words[wi];
+      if (!word) continue;
+      if (line.length === 0) {
+        if (word.length <= maxCols) {
+          line = word;
+        } else {
+          // Hard-split a word that's longer than the wrap width
+          let rem = word;
+          while (rem.length > maxCols && wrapped.length < maxLines - 1) {
+            wrapped.push(rem.slice(0, maxCols));
+            rem = rem.slice(maxCols);
+          }
+          line = rem;
+        }
+        continue;
+      }
+      const candidate = line + ' ' + word;
+      if (candidate.length <= maxCols) {
+        line = candidate;
+      } else {
+        wrapped.push(line);
+        if (wrapped.length >= maxLines) { line = ''; break; }
+        if (word.length <= maxCols) {
+          line = word;
+        } else {
+          let rem = word;
+          while (rem.length > maxCols && wrapped.length < maxLines - 1) {
+            wrapped.push(rem.slice(0, maxCols));
+            rem = rem.slice(maxCols);
+          }
+          line = rem;
+        }
+      }
+    }
+    if (line && wrapped.length < maxLines) wrapped.push(line);
+    // If there were more words than we had lines for, flag truncation.
+    // Rough check: compare chars consumed vs body length.
+    const consumedChars = wrapped.join(' ').length;
+    const bodyChars = bodyStrRaw.length;
+    if (wrapped.length >= maxLines && consumedChars < bodyChars) {
+      const last = wrapped[maxLines - 1];
+      if (last && last.length > 0) {
+        if (last.length >= maxCols - 1) {
+          wrapped[maxLines - 1] = last.slice(0, maxCols - 1) + '…';
+        } else {
+          wrapped[maxLines - 1] = last + ' …';
+        }
+      }
+    }
+  }
+
+  // Measure everything on a throwaway context
+  const measure = document.createElement('canvas').getContext('2d');
+
+  measure.font = 'bold ' + nameFontSize + "px 'Courier New', monospace";
+  const headerText = nameStr + ':';
+  const headerWidth = Math.ceil(measure.measureText(headerText).width);
+
+  measure.font = bodyFontSize + "px 'Courier New', monospace";
+  let bodyMaxWidth = 0;
+  for (let li = 0; li < wrapped.length; li++) {
+    const w = Math.ceil(measure.measureText(wrapped[li]).width);
+    if (w > bodyMaxWidth) bodyMaxWidth = w;
+  }
+
+  const contentWidth = Math.max(headerWidth, bodyMaxWidth);
+  const canvasWidth = Math.max(80, contentWidth + padX * 2 + accentW + 4);
+  const headerLineHeight = Math.ceil(nameFontSize * 1.2);
+  const bodyLineHeight = Math.ceil(bodyFontSize * 1.25);
+  const bodyBlockHeight = wrapped.length * bodyLineHeight + (wrapped.length > 0 ? lineGapY * (wrapped.length - 1) : 0);
+  const canvasHeight = Math.max(
+    32,
+    padY * 2 + headerLineHeight + (wrapped.length > 0 ? headerBodyGap + bodyBlockHeight : 0),
+  );
+
+  const cv = document.createElement('canvas');
+  cv.width = canvasWidth;
+  cv.height = canvasHeight;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  // Rounded pill background
+  const radius = 6 * DPR;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(1, 1, cv.width - 2, cv.height - 2, radius);
+    ctx.fill();
+  } else {
+    ctx.fillRect(1, 1, cv.width - 2, cv.height - 2);
+  }
+  // Thin border
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.lineWidth = Math.max(1, DPR);
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(1, 1, cv.width - 2, cv.height - 2, radius);
+    ctx.stroke();
+  }
+  // Left accent bar — spans the full content height
+  ctx.fillStyle = opts.accentColor || 'rgba(255, 255, 255, 0.85)';
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(3, padY, accentW, cv.height - padY * 2, [radius, 0, 0, radius]);
+    ctx.fill();
+  } else {
+    ctx.fillRect(3, padY, accentW, cv.height - padY * 2);
+  }
+
+  // Draw name header (bold, full color)
+  const textX = padX + accentW;
+  let y = padY;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + nameFontSize + "px 'Courier New', monospace";
+  ctx.fillStyle = opts.nameColor || 'rgba(255, 255, 255, 0.98)';
+  ctx.fillText(headerText, textX, y);
+  y += headerLineHeight + headerBodyGap;
+
+  // Draw wrapped body lines (dimmer, smaller font)
+  ctx.font = bodyFontSize + "px 'Courier New', monospace";
+  ctx.fillStyle = opts.bodyColor || 'rgba(255, 255, 255, 0.82)';
+  for (let li = 0; li < wrapped.length; li++) {
+    ctx.fillText(wrapped[li], textX, y);
+    y += bodyLineHeight + lineGapY;
+  }
+
+  // Wrap into a THREE.Sprite
+  const tex = new THREE.CanvasTexture(cv);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    sizeAttenuation: true,
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.renderOrder = 900;
+  // Placeholder scale — animate loop replaces this via
+  // applyViewportStableScale with the post-specific clamp overrides.
+  const aspect = cv.width / cv.height;
+  spr.scale.set(0.44 * aspect, 0.44, 1);
+  spr._canvasW = cv.width;
+  spr._canvasH = cv.height;
+  spr._postLineCount = wrapped.length;
+  spr._postHeaderLines = 1;
+  spr._isPostLabel = true;
+  return spr;
+}
+
 function makeChatSprite(text) {
   const fontStr = '12px Courier New';
   const maxChars = 150;
@@ -2389,10 +2607,19 @@ function addRoomMessage(roomId, peerId, agentName, content, opts = {}) {
     oldest.innerLine.material?.dispose();
   }
 
-  // Create label sprite (agentName: content) + clickable polyp mesh.
-  // The polyp is the raycast hit target; the sprite renders the text above.
-  const displayText = agentName + ': ' + content;
-  const sprite = TextSprite(displayText, { bold: true, fontSize: 13 });
+  // Create label sprite + clickable polyp mesh.
+  // The polyp is the raycast hit target; the sprite renders the
+  // name as a bold header on line 1 and word-wraps the content
+  // underneath (≤30 chars/line, ≤8 lines, ellipsis on overflow).
+  // We pass name and content as SEPARATE args so the wrapper never
+  // sees "agentName: ..." as one blob and chop the name mid-way —
+  // the name is always a whole unit on its own line.
+  const sprite = PostLabelSprite(agentName, content, {
+    maxCols: 30,
+    maxLines: 8,
+    nameFontSize: 14,
+    bodyFontSize: 10, // ~half the agent/room label size
+  });
   roomGroup.add(sprite);
 
   // Polyp mesh — small white sphere, hover target, raycast hit goes to modal
@@ -3579,8 +3806,30 @@ function animate() {
       // constant regardless of camera distance so labels never squish
       // or swell — the root fix for the "poorly injected labels"
       // symptom the user reported.
+      //
+      // Post labels are multi-line (bold name header + up to 8
+      // wrapped body lines). Their target pixel height scales with
+      // the line count so each line stays legible. The default
+      // clamp ceiling (LABEL_MAX_PX=56) is too small for a full
+      // 9-line canvas, so we pass an override cap of 160px. Single-
+      // line posts read at the same size as other labels; full 8-
+      // line posts expand up to 160px tall on screen.
       const labelDist = camera.position.distanceTo(entry.sprite.position);
-      applyViewportStableScale(entry.sprite, labelDist, LABEL_TARGET_PX);
+      if (entry.sprite._isPostLabel) {
+        const bodyLines = entry.sprite._postLineCount || 0;
+        // 18px for the bold name header + 11px per body line.
+        // Empirically tuned: at ~11px per body line the wrapped text
+        // reads cleanly without dominating the scene.
+        const postPxHeight = 18 + bodyLines * 11;
+        applyViewportStableScale(
+          entry.sprite,
+          labelDist,
+          postPxHeight,
+          { minPx: 22, maxPx: 160 },
+        );
+      } else {
+        applyViewportStableScale(entry.sprite, labelDist, LABEL_TARGET_PX);
+      }
 
       // Outer tether: polyp → boundary point (short connector on surface)
       const oAttr = entry.outerLine.geometry.attributes.position;
